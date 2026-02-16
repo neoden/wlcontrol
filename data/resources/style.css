@@ -12,11 +12,14 @@ button.scanning image {
 }
 
 @keyframes pulse {
-  0%, 100% {
+  from {
     opacity: 0.3;
   }
   50% {
     opacity: 1;
+  }
+  to {
+    opacity: 0.3;
   }
 }
 
