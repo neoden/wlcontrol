@@ -21,11 +21,13 @@ mod imp {
         #[template_child]
         pub battery_label: TemplateChild<gtk::Label>,
         #[template_child]
+        pub rssi_icon: TemplateChild<gtk::Image>,
+        #[template_child]
         pub connected_icon: TemplateChild<gtk::Image>,
         #[template_child]
         pub connecting_indicator: TemplateChild<gtk::Image>,
         #[template_child]
-        pub remove_button: TemplateChild<gtk::Button>,
+        pub settings_button: TemplateChild<gtk::Button>,
 
         pub device: OnceCell<BtDevice>,
     }
@@ -49,18 +51,18 @@ mod imp {
         fn signals() -> &'static [glib::subclass::Signal] {
             static SIGNALS: OnceLock<Vec<glib::subclass::Signal>> = OnceLock::new();
             SIGNALS.get_or_init(|| {
-                vec![glib::subclass::Signal::builder("remove-clicked").build()]
+                vec![glib::subclass::Signal::builder("settings-clicked").build()]
             })
         }
 
         fn constructed(&self) {
             self.parent_constructed();
 
-            self.remove_button.connect_clicked(glib::clone!(
+            self.settings_button.connect_clicked(glib::clone!(
                 #[weak(rename_to = row)]
                 self,
                 move |_| {
-                    row.obj().emit_by_name::<()>("remove-clicked", &[]);
+                    row.obj().emit_by_name::<()>("settings-clicked", &[]);
                 }
             ));
         }
@@ -130,43 +132,56 @@ impl BluetoothDeviceRow {
             BtDeviceState::Discovered => {
                 imp.connected_icon.set_visible(false);
                 imp.connecting_indicator.set_visible(false);
-                imp.remove_button.set_visible(false);
+                imp.settings_button.set_visible(false);
                 self.set_activatable(true);
+                // Show RSSI for discovered devices
+                if let Some(icon_name) = device.rssi_icon() {
+                    imp.rssi_icon.set_icon_name(Some(icon_name));
+                    imp.rssi_icon.set_visible(true);
+                } else {
+                    imp.rssi_icon.set_visible(false);
+                }
             }
             BtDeviceState::Pairing => {
                 imp.connected_icon.set_visible(false);
                 imp.connecting_indicator.set_visible(true);
-                imp.remove_button.set_visible(false);
+                imp.settings_button.set_visible(false);
+                imp.rssi_icon.set_visible(false);
                 self.set_activatable(false);
             }
             BtDeviceState::Paired => {
                 imp.connected_icon.set_visible(false);
                 imp.connecting_indicator.set_visible(false);
-                imp.remove_button.set_visible(true);
+                imp.settings_button.set_visible(true);
+                imp.rssi_icon.set_visible(false);
                 self.set_activatable(true);
             }
             BtDeviceState::Connecting => {
                 imp.connected_icon.set_visible(false);
                 imp.connecting_indicator.set_visible(true);
-                imp.remove_button.set_visible(false);
+                imp.settings_button.set_visible(false);
+                imp.rssi_icon.set_visible(false);
                 self.set_activatable(false);
             }
             BtDeviceState::Connected => {
                 imp.connected_icon.set_visible(true);
                 imp.connecting_indicator.set_visible(false);
-                imp.remove_button.set_visible(true);
+                imp.settings_button.set_visible(true);
+                imp.rssi_icon.set_visible(false);
                 self.set_activatable(true);
             }
             BtDeviceState::Disconnecting => {
                 imp.connected_icon.set_visible(false);
                 imp.connecting_indicator.set_visible(true);
-                imp.remove_button.set_visible(false);
+                imp.settings_button.set_visible(false);
+                imp.rssi_icon.set_visible(false);
                 self.set_activatable(false);
             }
             BtDeviceState::Removing => {
                 imp.connected_icon.set_visible(false);
                 imp.connecting_indicator.set_visible(true);
-                imp.remove_button.set_visible(false);
+                imp.settings_button.set_visible(false);
+                imp.rssi_icon.set_visible(false);
                 self.set_activatable(false);
             }
         }

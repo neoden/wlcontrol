@@ -422,15 +422,15 @@ impl BluetoothPage {
                     ));
 
                     row.connect_closure(
-                        "remove-clicked",
+                        "settings-clicked",
                         false,
                         glib::closure_local!(
                             #[weak]
                             manager,
                             #[weak]
                             device,
-                            move |_row: BluetoothDeviceRow| {
-                                manager.request_bt_remove(&device.path());
+                            move |row: BluetoothDeviceRow| {
+                                BluetoothPage::show_device_settings(&row, &manager, &device);
                             }
                         ),
                     );
@@ -439,6 +439,77 @@ impl BluetoothPage {
                 }
             ),
         );
+    }
+
+    fn show_device_settings(row: &BluetoothDeviceRow, manager: &WlcontrolManager, device: &BtDevice) {
+        let display_name = device.display_name();
+        let address = device.address();
+        let device_type = device.device_type_name();
+
+        let dialog = adw::AlertDialog::builder()
+            .heading(&display_name)
+            .body(&format!("{}\n{}", address, device_type))
+            .close_response("close")
+            .default_response("close")
+            .build();
+
+        // Extra child: preferences group with alias entry and trusted toggle
+        let alias_entry = adw::EntryRow::builder()
+            .title("Name")
+            .text(&display_name)
+            .build();
+
+        let trusted_switch = adw::SwitchRow::builder()
+            .title("Auto-connect")
+            .active(device.trusted())
+            .build();
+
+        // Send trusted change immediately
+        trusted_switch.connect_active_notify(glib::clone!(
+            #[weak]
+            manager,
+            #[weak]
+            device,
+            move |switch| {
+                manager.request_bt_set_trusted(&device.path(), switch.is_active());
+            }
+        ));
+
+        let group = adw::PreferencesGroup::new();
+        group.add(&alias_entry);
+        group.add(&trusted_switch);
+        dialog.set_extra_child(Some(&group));
+
+        dialog.add_response("forget", "Forget Device");
+        dialog.set_response_appearance("forget", adw::ResponseAppearance::Destructive);
+        dialog.add_response("close", "Close");
+        dialog.set_response_appearance("close", adw::ResponseAppearance::Suggested);
+
+        let original_alias = display_name.clone();
+
+        glib::spawn_future_local(glib::clone!(
+            #[weak]
+            manager,
+            #[weak]
+            device,
+            #[weak]
+            row,
+            async move {
+                let response = dialog.choose_future(Some(&row)).await;
+                match response.as_str() {
+                    "forget" => {
+                        manager.request_bt_remove(&device.path());
+                    }
+                    _ => {
+                        // Check if alias changed on close
+                        let new_alias = alias_entry.text().to_string();
+                        if !new_alias.is_empty() && new_alias != original_alias {
+                            manager.request_bt_set_alias(&device.path(), &new_alias);
+                        }
+                    }
+                }
+            }
+        ));
     }
 
     pub fn show_toast(&self, message: &str) {

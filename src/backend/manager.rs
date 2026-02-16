@@ -37,6 +37,8 @@ pub enum BackendCommand {
     BtDisconnect { path: String },
     BtPair { path: String },
     BtRemove { path: String },
+    BtSetAlias { path: String, alias: String },
+    BtSetTrusted { path: String, trusted: bool },
     BtSetPowered(bool),
     BtSetDiscoverable(bool),
     /// Response to a pairing confirmation/authorization (accept or reject)
@@ -69,6 +71,7 @@ pub struct BtDeviceData {
     pub trusted: bool,
     pub connected: bool,
     pub battery_percentage: i32, // -1 if not available
+    pub rssi: i16,               // i16::MIN = no data
 }
 
 /// Events sent from backend to UI
@@ -219,11 +222,6 @@ mod imp {
                 "bt-powered" => {
                     let powered = value.get().unwrap();
                     self.bt_powered.replace(powered);
-                    if !powered {
-                        self.obj().set_bt_discovering(false);
-                        self.obj().clear_bt_operations();
-                        self.obj().remove_unpaired_bt_devices();
-                    }
                     if let Some(tx) = self.cmd_tx.get() {
                         let tx = tx.clone();
                         glib::spawn_future_local(async move {
@@ -310,7 +308,16 @@ impl WlcontrolManager {
                 tracing::info!("Captive portal detected: {}", url);
                 self.emit_by_name::<()>("captive-portal", &[&url]);
             }
-            BackendEvent::BtPowered(powered) => self.set_bt_powered(powered),
+            BackendEvent::BtPowered(powered) => {
+                if !powered {
+                    self.set_bt_discovering(false);
+                    self.clear_bt_operations();
+                    self.reset_bt_connected_state();
+                    self.remove_unpaired_bt_devices();
+                    self.emit_by_name::<()>("bt-device-updated", &[]);
+                }
+                self.set_bt_powered(powered);
+            }
             BackendEvent::BtDiscovering(discovering) => self.set_bt_discovering(discovering),
             BackendEvent::BtDiscoverable(discoverable) => self.set_bt_discoverable(discoverable),
             BackendEvent::BtConnecting(address) => self.set_bt_connecting(&address),
@@ -542,6 +549,20 @@ impl WlcontrolManager {
         });
     }
 
+    pub fn request_bt_set_alias(&self, path: &str, alias: &str) {
+        self.send_command(BackendCommand::BtSetAlias {
+            path: path.to_string(),
+            alias: alias.to_string(),
+        });
+    }
+
+    pub fn request_bt_set_trusted(&self, path: &str, trusted: bool) {
+        self.send_command(BackendCommand::BtSetTrusted {
+            path: path.to_string(),
+            trusted,
+        });
+    }
+
     pub fn request_bt_remove(&self, path: &str) {
         self.set_bt_device_flag(path, |d| d.set_removing(true));
         self.send_command(BackendCommand::BtRemove {
@@ -575,6 +596,17 @@ impl WlcontrolManager {
             if let Some(obj) = store.item(i) {
                 let device = obj.downcast_ref::<BtDevice>().unwrap();
                 device.set_connecting(device.address() == address);
+            }
+        }
+    }
+
+    /// Reset connected state on all devices (adapter powered off).
+    fn reset_bt_connected_state(&self) {
+        let store = &self.imp().bt_devices;
+        for i in 0..store.n_items() {
+            if let Some(obj) = store.item(i) {
+                let device = obj.downcast_ref::<BtDevice>().unwrap();
+                device.set_connected(false);
             }
         }
     }
@@ -628,6 +660,7 @@ impl WlcontrolManager {
         device.set_alias(&data.alias);
         device.set_trusted(data.trusted);
         device.set_battery_percentage(data.battery_percentage);
+        device.set_rssi(data.rssi);
         self.imp().bt_devices.append(&device);
     }
 
@@ -643,6 +676,7 @@ impl WlcontrolManager {
                 device.set_trusted(data.trusted);
                 device.set_connected(data.connected);
                 device.set_battery_percentage(data.battery_percentage);
+                device.set_rssi(data.rssi);
             }
         }
     }
@@ -1115,6 +1149,16 @@ async fn run_backend(
                     BackendCommand::BtRemove { path } => {
                         if let Some(ref bt_backend) = bt {
                             bt_backend.remove(&path).await;
+                        }
+                    }
+                    BackendCommand::BtSetAlias { path, alias } => {
+                        if let Some(ref bt_backend) = bt {
+                            bt_backend.set_alias(&path, &alias).await;
+                        }
+                    }
+                    BackendCommand::BtSetTrusted { path, trusted } => {
+                        if let Some(ref bt_backend) = bt {
+                            bt_backend.set_trusted_flag(&path, trusted).await;
                         }
                     }
                     BackendCommand::BtSetPowered(powered) => {

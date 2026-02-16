@@ -35,6 +35,7 @@ mod imp {
         pub disconnecting: Cell<bool>,
         pub removing: Cell<bool>,
         pub battery_percentage: Cell<i32>, // -1 if not available
+        pub rssi: Cell<i16>,                // i16::MIN = no data
     }
 
     #[glib::object_subclass]
@@ -76,6 +77,12 @@ mod imp {
                         .default_value(-1)
                         .read_only()
                         .build(),
+                    glib::ParamSpecInt::builder("rssi")
+                        .minimum(i16::MIN as i32)
+                        .maximum(i16::MAX as i32)
+                        .default_value(i16::MIN as i32)
+                        .read_only()
+                        .build(),
                 ]
             })
         }
@@ -94,6 +101,7 @@ mod imp {
                 "disconnecting" => self.disconnecting.get().to_value(),
                 "removing" => self.removing.get().to_value(),
                 "battery-percentage" => self.battery_percentage.get().to_value(),
+                "rssi" => (self.rssi.get() as i32).to_value(),
                 _ => unimplemented!(),
             }
         }
@@ -123,6 +131,7 @@ impl BtDevice {
         imp.paired.set(paired);
         imp.connected.set(connected);
         imp.battery_percentage.set(-1);
+        imp.rssi.set(i16::MIN);
         device
     }
 
@@ -283,6 +292,31 @@ impl BtDevice {
         }
     }
 
+    pub fn rssi(&self) -> i16 {
+        self.imp().rssi.get()
+    }
+
+    pub fn set_rssi(&self, rssi: i16) {
+        if self.imp().rssi.get() != rssi {
+            self.imp().rssi.set(rssi);
+            self.notify("rssi");
+        }
+    }
+
+    /// Returns RSSI signal strength icon, or None if no RSSI data
+    pub fn rssi_icon(&self) -> Option<&'static str> {
+        let rssi = self.rssi();
+        if rssi == i16::MIN {
+            return None;
+        }
+        Some(match rssi {
+            -50..=0 => "network-wireless-signal-excellent-symbolic",
+            -70..=-51 => "network-wireless-signal-good-symbolic",
+            -80..=-71 => "network-wireless-signal-ok-symbolic",
+            _ => "network-wireless-signal-weak-symbolic",
+        })
+    }
+
     /// Returns appropriate icon name based on device type
     pub fn device_icon(&self) -> &'static str {
         let icon = self.imp().icon.borrow();
@@ -294,6 +328,22 @@ impl BtDevice {
             "phone" => "phone-symbolic",
             "computer" => "computer-symbolic",
             _ => "bluetooth-symbolic",
+        }
+    }
+
+    /// Returns a human-readable device type string based on icon
+    pub fn device_type_name(&self) -> &'static str {
+        let icon = self.imp().icon.borrow();
+        match icon.as_str() {
+            "audio-card" => "Audio",
+            "audio-headphones" => "Headphones",
+            "audio-headset" => "Headset",
+            "input-keyboard" => "Keyboard",
+            "input-mouse" => "Mouse",
+            "input-gaming" => "Gamepad",
+            "phone" => "Phone",
+            "computer" => "Computer",
+            _ => "Bluetooth Device",
         }
     }
 

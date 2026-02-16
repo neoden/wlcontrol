@@ -300,6 +300,13 @@ impl BluetoothBackend {
                 .flatten()
                 .map(|p| p as i32)
                 .unwrap_or(-1),
+            rssi: device
+                .rssi()
+                .await
+                .ok()
+                .flatten()
+                .map(|r| r as i16)
+                .unwrap_or(i16::MIN),
         })
     }
 
@@ -559,6 +566,46 @@ impl BluetoothBackend {
             }
             Err(e) => {
                 tracing::error!("BT remove {} failed: {}", addr, e);
+                let _ = self
+                    .evt_tx
+                    .send(BackendEvent::Error(format_bt_error(&e)))
+                    .await;
+            }
+        }
+    }
+
+    /// Set alias (display name) for a device by address string
+    pub async fn set_alias(&self, addr_str: &str, alias: &str) {
+        let Some(ref adapter) = self.adapter else {
+            return;
+        };
+        let Some(addr) = Self::parse_address(addr_str) else {
+            return;
+        };
+
+        if let Ok(device) = adapter.device(addr) {
+            if let Err(e) = device.set_alias(alias.to_string()).await {
+                tracing::error!("BT set alias for {} failed: {}", addr, e);
+                let _ = self
+                    .evt_tx
+                    .send(BackendEvent::Error(format_bt_error(&e)))
+                    .await;
+            }
+        }
+    }
+
+    /// Set trusted flag for a device by address string
+    pub async fn set_trusted_flag(&self, addr_str: &str, trusted: bool) {
+        let Some(ref adapter) = self.adapter else {
+            return;
+        };
+        let Some(addr) = Self::parse_address(addr_str) else {
+            return;
+        };
+
+        if let Ok(device) = adapter.device(addr) {
+            if let Err(e) = device.set_trusted(trusted).await {
+                tracing::error!("BT set trusted {} for {} failed: {}", trusted, addr, e);
                 let _ = self
                     .evt_tx
                     .send(BackendEvent::Error(format_bt_error(&e)))

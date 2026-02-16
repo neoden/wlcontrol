@@ -33,6 +33,14 @@ corresponding .blp file and regenerate this file with blueprint-compiler.
       </object>
     </child>
     <child type="suffix">
+      <object class="GtkImage" id="rssi_icon">
+        <property name="visible">false</property>
+        <style>
+          <class name="dim-label"/>
+        </style>
+      </object>
+    </child>
+    <child type="suffix">
       <object class="GtkImage" id="connected_icon">
         <property name="icon-name">emblem-ok-symbolic</property>
         <property name="visible">false</property>
@@ -52,9 +60,9 @@ corresponding .blp file and regenerate this file with blueprint-compiler.
       </object>
     </child>
     <child type="suffix">
-      <object class="GtkButton" id="remove_button">
-        <property name="icon-name">edit-clear-symbolic</property>
-        <property name="tooltip-text">Remove device</property>
+      <object class="GtkButton" id="settings_button">
+        <property name="icon-name">view-more-symbolic</property>
+        <property name="tooltip-text">Device settings</property>
         <property name="valign">3</property>
         <property name="visible">false</property>
         <style>

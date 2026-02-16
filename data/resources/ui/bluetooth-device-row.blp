@@ -28,6 +28,15 @@ template $BluetoothDeviceRow: Adw.ActionRow {
   }
 
   [suffix]
+  Gtk.Image rssi_icon {
+    visible: false;
+
+    styles [
+      "dim-label",
+    ]
+  }
+
+  [suffix]
   Gtk.Image connected_icon {
     icon-name: "emblem-ok-symbolic";
     visible: false;
@@ -49,9 +58,9 @@ template $BluetoothDeviceRow: Adw.ActionRow {
   }
 
   [suffix]
-  Gtk.Button remove_button {
-    icon-name: "edit-clear-symbolic";
-    tooltip-text: "Remove device";
+  Gtk.Button settings_button {
+    icon-name: "view-more-symbolic";
+    tooltip-text: "Device settings";
     valign: center;
     visible: false;
 
