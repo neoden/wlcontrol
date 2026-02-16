@@ -6,8 +6,58 @@ use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
 use zbus::zvariant::OwnedObjectPath;
 
+use std::time::Duration;
+
 use super::manager::{BackendEvent, WifiNetworkData};
 use super::wifi::iwd_proxy::{DeviceProxy, KnownNetworkProxy, NetworkProxy, StationProxy};
+
+const CAPTIVE_PORTAL_CHECK_URL: &str = "http://connectivitycheck.gstatic.com/generate_204";
+
+/// Check if a captive portal is present by probing a known URL.
+/// Returns `Some(portal_url)` if a captive portal is detected, `None` otherwise.
+/// Retries until the network stack is ready (DHCP/DNS may take variable time after WiFi connects).
+async fn check_captive_portal() -> Option<String> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
+        .timeout(Duration::from_secs(3))
+        .build()
+        .ok()?;
+
+    for attempt in 1..=10 {
+        if attempt > 1 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+
+        let resp = match client.get(CAPTIVE_PORTAL_CHECK_URL).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!("Captive portal check attempt {}/10: {}", attempt, e);
+                continue;
+            }
+        };
+
+        if resp.status().as_u16() == 204 {
+            tracing::debug!("No captive portal detected");
+            return None;
+        } else if resp.status().is_redirection() {
+            let url = resp
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or(CAPTIVE_PORTAL_CHECK_URL)
+                .to_string();
+            tracing::info!("Captive portal detected (redirect to {})", url);
+            return Some(url);
+        } else {
+            tracing::info!("Captive portal detected (status {})", resp.status());
+            return Some(CAPTIVE_PORTAL_CHECK_URL.to_string());
+        }
+    }
+
+    tracing::debug!("Captive portal check: network not reachable after retries");
+    None
+}
 
 /// Convert iwd D-Bus errors to user-friendly messages
 pub fn format_iwd_error(e: &zbus::Error) -> String {
@@ -273,6 +323,13 @@ impl WifiBackend {
                     tracing::info!("Connected to {}", path);
                     let _ = evt_tx.send(BackendEvent::WifiConnected(Some(path.clone()))).await;
                     let _ = evt_tx.send(BackendEvent::WifiNetworkKnown { path }).await;
+
+                    // Check for captive portal
+                    if let Some(portal_url) = check_captive_portal().await {
+                        let _ = evt_tx
+                            .send(BackendEvent::CaptivePortal { url: portal_url })
+                            .await;
+                    }
                 }
                 Ok(Err(e)) => {
                     tracing::error!("Connect failed: {}", e);
@@ -317,8 +374,18 @@ impl WifiBackend {
         station.connected_network().await.ok().map(|p| p.to_string())
     }
 
+    /// Abort any pending connection task (connect + captive portal check)
+    async fn abort_pending_connect(&self) {
+        let mut guard = self.pending_connect.lock().await;
+        if let Some(handle) = guard.take() {
+            tracing::debug!("Aborting pending connection task");
+            handle.abort();
+        }
+    }
+
     /// Disconnect from current WiFi network
     pub async fn disconnect(&self) {
+        self.abort_pending_connect().await;
         let Some(station) = self.station().await else { return };
         tracing::info!("Disconnecting from WiFi");
         match station.disconnect().await {
@@ -377,6 +444,9 @@ impl WifiBackend {
 
     /// Set WiFi adapter power state
     pub async fn set_powered(&self, powered: bool) {
+        if !powered {
+            self.abort_pending_connect().await;
+        }
         let Some(ref path) = self.device_path else { return };
 
         let device = match create_device_proxy(&self.conn, path).await {

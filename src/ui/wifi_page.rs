@@ -1,6 +1,6 @@
 use adw::prelude::*;
 use adw::subclass::prelude::*;
-use gtk::glib;
+use gtk::{gio, glib};
 use std::cell::OnceCell;
 
 use crate::backend::wifi::WifiNetwork;
@@ -160,6 +160,26 @@ impl WifiPage {
                 self,
                 move |_manager: WlcontrolManager, message: String| {
                     page.show_toast(&message);
+                }
+            ),
+        );
+
+        // Handle captive portal
+        manager.connect_closure(
+            "captive-portal",
+            false,
+            glib::closure_local!(
+                #[weak(rename_to = page)]
+                self,
+                move |_manager: WlcontrolManager, url: String| {
+                    page.show_toast("Login required — opening browser");
+                    let launcher = gtk::UriLauncher::new(&url);
+                    let window = page.root().and_downcast::<gtk::Window>();
+                    launcher.launch(window.as_ref(), gio::Cancellable::NONE, |result| {
+                        if let Err(e) = result {
+                            tracing::error!("Failed to open browser: {}", e);
+                        }
+                    });
                 }
             ),
         );

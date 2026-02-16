@@ -66,6 +66,8 @@ pub enum BackendEvent {
         network_path: String,
         network_name: String,
     },
+    /// Captive portal detected after connection, URL to open in browser
+    CaptivePortal { url: String },
     BtPowered(bool),
     BtDiscovering(bool),
     BtDiscoverable(bool),
@@ -145,6 +147,9 @@ mod imp {
                 vec![
                     glib::subclass::Signal::builder("passphrase-requested")
                         .param_types([String::static_type(), String::static_type()])
+                        .build(),
+                    glib::subclass::Signal::builder("captive-portal")
+                        .param_types([String::static_type()])
                         .build(),
                     glib::subclass::Signal::builder("error")
                         .param_types([String::static_type()])
@@ -261,6 +266,10 @@ impl WlcontrolManager {
                     network_path
                 );
                 self.emit_by_name::<()>("passphrase-requested", &[&network_path, &network_name]);
+            }
+            BackendEvent::CaptivePortal { url } => {
+                tracing::info!("Captive portal detected: {}", url);
+                self.emit_by_name::<()>("captive-portal", &[&url]);
             }
             BackendEvent::BtPowered(powered) => self.set_bt_powered(powered),
             BackendEvent::BtDiscovering(discovering) => self.set_bt_discovering(discovering),
