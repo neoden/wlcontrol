@@ -39,6 +39,12 @@ pub enum BackendCommand {
     BtRemove { path: String },
     BtSetPowered(bool),
     BtSetDiscoverable(bool),
+    /// Response to a pairing confirmation/authorization (accept or reject)
+    BtPairingResponse { accept: bool },
+    /// Response with PIN code
+    BtPairingPinResponse { pin: Option<String> },
+    /// Response with numeric passkey
+    BtPairingPasskeyResponse { passkey: Option<u32> },
 }
 
 /// Data for a WiFi network, used to transfer between backend and UI threads
@@ -50,6 +56,19 @@ pub struct WifiNetworkData {
     pub signal_strength: i16,
     pub connected: bool,
     pub known: bool,
+}
+
+/// Data for a Bluetooth device, used to transfer between backend and UI threads
+#[derive(Debug, Clone)]
+pub struct BtDeviceData {
+    pub address: String,
+    pub name: String,
+    pub alias: String,
+    pub icon: String,
+    pub paired: bool,
+    pub trusted: bool,
+    pub connected: bool,
+    pub battery_percentage: i32, // -1 if not available
 }
 
 /// Events sent from backend to UI
@@ -71,6 +90,13 @@ pub enum BackendEvent {
     BtPowered(bool),
     BtDiscovering(bool),
     BtDiscoverable(bool),
+    BtConnecting(String),    // address of device we're connecting/pairing to
+    BtDeviceAdded(BtDeviceData),
+    BtDeviceChanged(BtDeviceData),
+    BtDeviceRemoved(String), // address
+    /// Pairing interaction. kind: "confirm-passkey", "request-pin", "request-passkey",
+    /// "display-passkey", "display-pin", "authorize". code: passkey/pin or empty.
+    BtPairing { kind: String, address: String, code: String },
     Error(String),
 }
 
@@ -154,6 +180,14 @@ mod imp {
                     glib::subclass::Signal::builder("error")
                         .param_types([String::static_type()])
                         .build(),
+                    glib::subclass::Signal::builder("bt-device-updated").build(),
+                    glib::subclass::Signal::builder("bt-pairing")
+                        .param_types([
+                            String::static_type(), // kind
+                            String::static_type(), // address
+                            String::static_type(), // code
+                        ])
+                        .build(),
                 ]
             })
         }
@@ -185,6 +219,11 @@ mod imp {
                 "bt-powered" => {
                     let powered = value.get().unwrap();
                     self.bt_powered.replace(powered);
+                    if !powered {
+                        self.obj().set_bt_discovering(false);
+                        self.obj().clear_bt_operations();
+                        self.obj().remove_unpaired_bt_devices();
+                    }
                     if let Some(tx) = self.cmd_tx.get() {
                         let tx = tx.clone();
                         glib::spawn_future_local(async move {
@@ -274,8 +313,25 @@ impl WlcontrolManager {
             BackendEvent::BtPowered(powered) => self.set_bt_powered(powered),
             BackendEvent::BtDiscovering(discovering) => self.set_bt_discovering(discovering),
             BackendEvent::BtDiscoverable(discoverable) => self.set_bt_discoverable(discoverable),
+            BackendEvent::BtConnecting(address) => self.set_bt_connecting(&address),
+            BackendEvent::BtDeviceAdded(data) => self.add_bt_device(&data),
+            BackendEvent::BtDeviceChanged(data) => {
+                self.update_bt_device(&data);
+                // BlueZ confirmed state change — clear local operation flags for this device
+                self.set_bt_device_flag(&data.address, |d| {
+                    d.set_connecting(false);
+                    d.set_disconnecting(false);
+                    // Don't clear removing — that's only cleared by BtDeviceRemoved or Error
+                });
+                self.emit_by_name::<()>("bt-device-updated", &[]);
+            }
+            BackendEvent::BtDeviceRemoved(address) => self.remove_bt_device(&address),
+            BackendEvent::BtPairing { kind, address, code } => {
+                self.emit_by_name::<()>("bt-pairing", &[&kind, &address, &code]);
+            }
             BackendEvent::Error(msg) => {
                 tracing::error!("Backend error: {}", msg);
+                self.clear_bt_operations();
                 self.emit_by_name::<()>("error", &[&msg]);
             }
         }
@@ -396,6 +452,21 @@ impl WlcontrolManager {
         }
     }
 
+    fn remove_unpaired_bt_devices(&self) {
+        let store = &self.imp().bt_devices;
+        let mut i = 0;
+        while i < store.n_items() {
+            if let Some(obj) = store.item(i) {
+                let device = obj.downcast_ref::<BtDevice>().unwrap();
+                if !device.paired() {
+                    store.remove(i);
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+
     pub fn bt_discovering(&self) -> bool {
         *self.imp().bt_discovering.borrow()
     }
@@ -446,28 +517,140 @@ impl WlcontrolManager {
         self.send_command(BackendCommand::BtScan);
     }
 
+    pub fn request_bt_stop_scan(&self) {
+        self.send_command(BackendCommand::BtStopScan);
+    }
+
     pub fn request_bt_connect(&self, path: &str) {
+        self.set_bt_device_flag(path, |d| d.set_connecting(true));
         self.send_command(BackendCommand::BtConnect {
             path: path.to_string(),
         });
     }
 
     pub fn request_bt_disconnect(&self, path: &str) {
+        self.set_bt_device_flag(path, |d| d.set_disconnecting(true));
         self.send_command(BackendCommand::BtDisconnect {
             path: path.to_string(),
         });
     }
 
     pub fn request_bt_pair(&self, path: &str) {
+        self.set_bt_device_flag(path, |d| d.set_connecting(true));
         self.send_command(BackendCommand::BtPair {
             path: path.to_string(),
         });
     }
 
     pub fn request_bt_remove(&self, path: &str) {
+        self.set_bt_device_flag(path, |d| d.set_removing(true));
         self.send_command(BackendCommand::BtRemove {
             path: path.to_string(),
         });
+    }
+
+    pub fn send_bt_pairing_response(&self, accept: bool) {
+        self.send_command(BackendCommand::BtPairingResponse { accept });
+    }
+
+    pub fn send_bt_pairing_pin(&self, pin: Option<String>) {
+        self.send_command(BackendCommand::BtPairingPinResponse { pin });
+    }
+
+    pub fn send_bt_pairing_passkey(&self, passkey: Option<u32>) {
+        self.send_command(BackendCommand::BtPairingPasskeyResponse { passkey });
+    }
+
+    fn set_bt_device_flag(&self, address: &str, f: impl Fn(&BtDevice)) {
+        if let Some(idx) = self.find_bt_device_index(address) {
+            if let Some(obj) = self.imp().bt_devices.item(idx) {
+                f(obj.downcast_ref::<BtDevice>().unwrap());
+            }
+        }
+    }
+
+    fn set_bt_connecting(&self, address: &str) {
+        let store = &self.imp().bt_devices;
+        for i in 0..store.n_items() {
+            if let Some(obj) = store.item(i) {
+                let device = obj.downcast_ref::<BtDevice>().unwrap();
+                device.set_connecting(device.address() == address);
+            }
+        }
+    }
+
+    /// Clear all local operation flags on all devices.
+    /// Called on errors and state changes as a conservative reset.
+    fn clear_bt_operations(&self) {
+        let store = &self.imp().bt_devices;
+        for i in 0..store.n_items() {
+            if let Some(obj) = store.item(i) {
+                let device = obj.downcast_ref::<BtDevice>().unwrap();
+                device.set_connecting(false);
+                device.set_disconnecting(false);
+                device.set_removing(false);
+            }
+        }
+    }
+
+    fn find_bt_device_index(&self, address: &str) -> Option<u32> {
+        let store = &self.imp().bt_devices;
+        for i in 0..store.n_items() {
+            if let Some(obj) = store.item(i) {
+                let device = obj.downcast_ref::<BtDevice>().unwrap();
+                if device.address() == address {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    }
+
+    fn add_bt_device(&self, data: &BtDeviceData) {
+        // If already exists, update instead
+        if self.find_bt_device_index(&data.address).is_some() {
+            self.update_bt_device(data);
+            self.emit_by_name::<()>("bt-device-updated", &[]);
+            return;
+        }
+        let device = BtDevice::new(
+            &data.address, // path = address (bluer uses addresses, not D-Bus paths)
+            &data.address,
+            if data.name.is_empty() {
+                &data.alias
+            } else {
+                &data.name
+            },
+            &data.icon,
+            data.paired,
+            data.connected,
+        );
+        device.set_alias(&data.alias);
+        device.set_trusted(data.trusted);
+        device.set_battery_percentage(data.battery_percentage);
+        self.imp().bt_devices.append(&device);
+    }
+
+    fn update_bt_device(&self, data: &BtDeviceData) {
+        let store = &self.imp().bt_devices;
+        if let Some(idx) = self.find_bt_device_index(&data.address) {
+            if let Some(obj) = store.item(idx) {
+                let device = obj.downcast_ref::<BtDevice>().unwrap();
+                device.set_name(&data.name);
+                device.set_alias(&data.alias);
+                device.set_icon(&data.icon);
+                device.set_paired(data.paired);
+                device.set_trusted(data.trusted);
+                device.set_connected(data.connected);
+                device.set_battery_percentage(data.battery_percentage);
+            }
+        }
+    }
+
+    fn remove_bt_device(&self, address: &str) {
+        if let Some(idx) = self.find_bt_device_index(address) {
+            self.imp().bt_devices.remove(idx);
+        }
     }
 
     /// Shutdown the backend gracefully
@@ -481,6 +664,8 @@ impl WlcontrolManager {
     }
 }
 
+use super::bluetooth::backend::{BtAdapterEventStream, BtDeviceEventStream, BtDiscoveryStream, BtPairingRequest};
+use super::bluetooth::BluetoothBackend;
 use super::wifi::iwd_proxy::{AgentManagerProxy, DeviceProxy, StationProxy};
 use super::wifi::{IwdAgent, PassphraseRequest};
 use super::wifi_backend::{get_wifi_networks, has_station_interface, WifiBackend};
@@ -589,10 +774,48 @@ async fn run_backend(
         }
     }
 
-    // TODO: Initialize BlueZ
+    // Initialize Bluetooth backend
+    let (bt, bt_pairing_rx): (Option<BluetoothBackend>, Option<async_channel::Receiver<BtPairingRequest>>) =
+        match BluetoothBackend::new(evt_tx.clone()).await {
+            Ok((bt, rx)) => (Some(bt), Some(rx)),
+            Err(e) => {
+                tracing::warn!("Failed to initialize Bluetooth backend: {}. BT disabled.", e);
+                let _ = evt_tx
+                    .send(BackendEvent::Error(format!("Bluetooth: {}", e)))
+                    .await;
+                (None, None)
+            }
+        };
+
+    // BT streams stored externally to avoid borrow conflicts in tokio::select!
+    let mut bt_discovery_stream: Option<BtDiscoveryStream> = None;
+    let mut bt_adapter_events: Option<BtAdapterEventStream> = None;
+    let mut bt_device_events: futures::stream::SelectAll<BtDeviceEventStream> =
+        futures::stream::SelectAll::new();
+    let mut bt_tracked_devices: std::collections::HashSet<bluer::Address> =
+        std::collections::HashSet::new();
+
+    // Send initial BT state and start always-on adapter event stream
+    if let Some(ref bt_backend) = bt {
+        bt_backend
+            .send_initial_state(&mut bt_device_events, &mut bt_tracked_devices)
+            .await;
+        bt_adapter_events = bt_backend.adapter_events().await;
+    }
 
     // Store pending passphrase response sender
     let mut pending_passphrase_response: Option<oneshot::Sender<Option<String>>> = None;
+
+    // Store pending BT pairing response senders
+    let mut pending_pairing_response: Option<
+        oneshot::Sender<Result<(), bluer::agent::ReqError>>,
+    > = None;
+    let mut pending_pin_response: Option<
+        oneshot::Sender<Result<String, bluer::agent::ReqError>>,
+    > = None;
+    let mut pending_passkey_response: Option<
+        oneshot::Sender<Result<u32, bluer::agent::ReqError>>,
+    > = None;
 
     // Set up property change streams for Device
     let mut device_powered_stream = if let Some(path) = wifi.device_path() {
@@ -674,8 +897,25 @@ async fn run_backend(
         }
     }
 
+    let mut bt_scan_deadline: Option<tokio::time::Instant> = None;
+
     loop {
         tokio::select! {
+            // Auto-stop BT discovery after timeout
+            _ = async {
+                match bt_scan_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                tracing::info!("Bluetooth discovery timeout (30s), stopping scan");
+                if bt_discovery_stream.take().is_some() {
+                    if let Some(ref bt_backend) = bt {
+                        bt_backend.notify_scan_stopped().await;
+                    }
+                }
+                bt_scan_deadline = None;
+            }
             // Handle Device.powered changes
             Some(change) = async {
                 match device_powered_stream.as_mut() {
@@ -731,13 +971,88 @@ async fn run_backend(
                     wifi.send_connected_status().await;
                 }
             }
-            // Handle passphrase requests from agent
+            // Handle passphrase requests from iwd agent
             Ok(request) = passphrase_rx.recv() => {
                 tracing::info!("Passphrase request: {} ({})", request.network_name, request.network_path);
                 pending_passphrase_response = Some(request.response_tx);
                 let _ = evt_tx.send(BackendEvent::PassphraseRequest {
                     network_path: request.network_path,
                     network_name: request.network_name,
+                }).await;
+            }
+            // Handle BT discovery stream events
+            Some(adapter_event) = async {
+                match bt_discovery_stream.as_mut() {
+                    Some(stream) => stream.next().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(ref bt_backend) = bt {
+                    bt_backend.handle_adapter_event(
+                        adapter_event,
+                        &mut bt_device_events,
+                        &mut bt_tracked_devices,
+                    ).await;
+                }
+            }
+            // Handle always-on adapter events (DeviceAdded/DeviceRemoved even when not scanning)
+            Some(adapter_event) = async {
+                match bt_adapter_events.as_mut() {
+                    Some(stream) => stream.next().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(ref bt_backend) = bt {
+                    bt_backend.handle_adapter_event(
+                        adapter_event,
+                        &mut bt_device_events,
+                        &mut bt_tracked_devices,
+                    ).await;
+                }
+            }
+            // Handle per-device BT property change events
+            Some((addr, event)) = bt_device_events.next() => {
+                if let Some(ref bt_backend) = bt {
+                    let bluer::DeviceEvent::PropertyChanged(prop) = event;
+                    bt_backend.handle_device_property_change(addr, prop).await;
+                }
+            }
+            // Handle BT pairing agent requests
+            Ok(request) = async {
+                match bt_pairing_rx.as_ref() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let (kind, address, code) = match request {
+                    BtPairingRequest::ConfirmPasskey { address, passkey, response_tx } => {
+                        pending_pairing_response = Some(response_tx);
+                        ("confirm-passkey", address, format!("{:06}", passkey))
+                    }
+                    BtPairingRequest::RequestPinCode { address, response_tx } => {
+                        pending_pin_response = Some(response_tx);
+                        ("request-pin", address, String::new())
+                    }
+                    BtPairingRequest::RequestPasskey { address, response_tx } => {
+                        pending_passkey_response = Some(response_tx);
+                        ("request-passkey", address, String::new())
+                    }
+                    BtPairingRequest::DisplayPasskey { address, passkey } => {
+                        ("display-passkey", address, format!("{:06}", passkey))
+                    }
+                    BtPairingRequest::DisplayPinCode { address, pin_code } => {
+                        ("display-pin", address, pin_code)
+                    }
+                    BtPairingRequest::RequestAuthorization { address, response_tx } => {
+                        pending_pairing_response = Some(response_tx);
+                        ("authorize", address, String::new())
+                    }
+                };
+                tracing::info!("BT pairing {} for {} ({})", kind, address, code);
+                let _ = evt_tx.send(BackendEvent::BtPairing {
+                    kind: kind.to_string(),
+                    address: address.to_string(),
+                    code,
                 }).await;
             }
             // Handle commands from UI
@@ -751,6 +1066,7 @@ async fn run_backend(
                     BackendCommand::Shutdown => {
                         tracing::info!("Backend shutdown requested");
                         wifi.shutdown();
+                        drop(bt_discovery_stream);
                         break;
                     }
                     BackendCommand::PassphraseResponse { passphrase } => {
@@ -764,30 +1080,98 @@ async fn run_backend(
                     BackendCommand::WifiForget { path } => wifi.forget(&path).await,
                     BackendCommand::WifiSetPowered(powered) => wifi.set_powered(powered).await,
                     BackendCommand::BtScan => {
-                        tracing::info!("Bluetooth scan requested (stub)");
-                        let _ = evt_tx.send(BackendEvent::BtDiscovering(true)).await;
+                        if bt_discovery_stream.is_none() {
+                            if let Some(ref bt_backend) = bt {
+                                bt_discovery_stream = bt_backend.start_scan().await;
+                                if bt_discovery_stream.is_some() {
+                                    bt_scan_deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(30));
+                                }
+                            }
+                        }
                     }
                     BackendCommand::BtStopScan => {
-                        tracing::info!("Bluetooth stop scan requested (stub)");
-                        let _ = evt_tx.send(BackendEvent::BtDiscovering(false)).await;
+                        if bt_discovery_stream.take().is_some() {
+                            bt_scan_deadline = None;
+                            if let Some(ref bt_backend) = bt {
+                                bt_backend.notify_scan_stopped().await;
+                            }
+                        }
                     }
                     BackendCommand::BtConnect { path } => {
-                        tracing::info!("Bluetooth connect to {} requested (stub)", path);
+                        if let Some(ref bt_backend) = bt {
+                            bt_backend.connect(&path).await;
+                        }
                     }
                     BackendCommand::BtDisconnect { path } => {
-                        tracing::info!("Bluetooth disconnect from {} requested (stub)", path);
+                        if let Some(ref bt_backend) = bt {
+                            bt_backend.disconnect(&path).await;
+                        }
                     }
                     BackendCommand::BtPair { path } => {
-                        tracing::info!("Bluetooth pair with {} requested (stub)", path);
+                        if let Some(ref bt_backend) = bt {
+                            bt_backend.pair(&path);
+                        }
                     }
                     BackendCommand::BtRemove { path } => {
-                        tracing::info!("Bluetooth remove {} requested (stub)", path);
+                        if let Some(ref bt_backend) = bt {
+                            bt_backend.remove(&path).await;
+                        }
                     }
                     BackendCommand::BtSetPowered(powered) => {
-                        tracing::info!("Bluetooth set powered {} (stub)", powered);
+                        if !powered {
+                            if bt_discovery_stream.take().is_some() {
+                                if let Some(ref bt_backend) = bt {
+                                    bt_backend.notify_scan_stopped().await;
+                                }
+                            }
+                            bt_scan_deadline = None;
+                            bt_tracked_devices.clear();
+                            bt_device_events = futures::stream::SelectAll::new();
+                            bt_adapter_events = None;
+                        }
+                        if let Some(ref bt_backend) = bt {
+                            bt_backend.set_powered(powered).await;
+                            if powered {
+                                bt_backend.send_initial_state(
+                                    &mut bt_device_events,
+                                    &mut bt_tracked_devices,
+                                ).await;
+                                bt_adapter_events = bt_backend.adapter_events().await;
+                            }
+                        }
                     }
                     BackendCommand::BtSetDiscoverable(discoverable) => {
-                        tracing::info!("Bluetooth set discoverable {} (stub)", discoverable);
+                        if let Some(ref bt_backend) = bt {
+                            bt_backend.set_discoverable(discoverable).await;
+                        }
+                    }
+                    BackendCommand::BtPairingResponse { accept } => {
+                        if let Some(tx) = pending_pairing_response.take() {
+                            let result = if accept {
+                                Ok(())
+                            } else {
+                                Err(bluer::agent::ReqError::Rejected)
+                            };
+                            let _ = tx.send(result);
+                        }
+                    }
+                    BackendCommand::BtPairingPinResponse { pin } => {
+                        if let Some(tx) = pending_pin_response.take() {
+                            let result = match pin {
+                                Some(p) => Ok(p),
+                                None => Err(bluer::agent::ReqError::Rejected),
+                            };
+                            let _ = tx.send(result);
+                        }
+                    }
+                    BackendCommand::BtPairingPasskeyResponse { passkey } => {
+                        if let Some(tx) = pending_passkey_response.take() {
+                            let result = match passkey {
+                                Some(k) => Ok(k),
+                                None => Err(bluer::agent::ReqError::Rejected),
+                            };
+                            let _ = tx.send(result);
+                        }
                     }
                 }
             }

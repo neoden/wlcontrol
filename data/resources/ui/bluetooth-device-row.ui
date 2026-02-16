@@ -42,16 +42,24 @@ corresponding .blp file and regenerate this file with blueprint-compiler.
       </object>
     </child>
     <child type="suffix">
-      <object class="GtkSpinner" id="connecting_spinner">
+      <object class="GtkImage" id="connecting_indicator">
+        <property name="icon-name">media-record-symbolic</property>
         <property name="visible">false</property>
+        <style>
+          <class name="connecting-pulse"/>
+          <class name="accent"/>
+        </style>
       </object>
     </child>
     <child type="suffix">
-      <object class="GtkButton" id="action_button">
+      <object class="GtkButton" id="remove_button">
+        <property name="icon-name">edit-clear-symbolic</property>
+        <property name="tooltip-text">Remove device</property>
         <property name="valign">3</property>
         <property name="visible">false</property>
         <style>
           <class name="flat"/>
+          <class name="circular"/>
         </style>
       </object>
     </child>

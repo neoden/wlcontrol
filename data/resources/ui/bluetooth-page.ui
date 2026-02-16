@@ -73,23 +73,13 @@ corresponding .blp file and regenerate this file with blueprint-compiler.
                       <object class="AdwPreferencesGroup" id="discovered_group">
                         <property name="title">Available Devices</property>
                         <property name="header-suffix">
-                          <object class="GtkBox">
-                            <property name="spacing">6</property>
-                            <child>
-                              <object class="GtkSpinner" id="scan_spinner">
-                                <property name="visible">false</property>
-                              </object>
-                            </child>
-                            <child>
-                              <object class="GtkButton" id="scan_button">
-                                <property name="icon-name">view-refresh-symbolic</property>
-                                <property name="tooltip-text">Scan for devices</property>
-                                <signal name="clicked" handler="on_scan_clicked" swapped="True"/>
-                                <style>
-                                  <class name="flat"/>
-                                </style>
-                              </object>
-                            </child>
+                          <object class="GtkButton" id="scan_button">
+                            <property name="icon-name">view-refresh-symbolic</property>
+                            <property name="tooltip-text">Scan for devices</property>
+                            <signal name="clicked" handler="on_scan_clicked" swapped="True"/>
+                            <style>
+                              <class name="flat"/>
+                            </style>
                           </object>
                         </property>
                         <child>

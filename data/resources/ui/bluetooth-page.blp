@@ -61,22 +61,14 @@ template $BluetoothPage: Adw.Bin {
           Adw.PreferencesGroup discovered_group {
             title: "Available Devices";
 
-            header-suffix: Gtk.Box {
-              spacing: 6;
+            header-suffix: Gtk.Button scan_button {
+              icon-name: "view-refresh-symbolic";
+              tooltip-text: "Scan for devices";
+              clicked => $on_scan_clicked() swapped;
 
-              Gtk.Spinner scan_spinner {
-                visible: false;
-              }
-
-              Gtk.Button scan_button {
-                icon-name: "view-refresh-symbolic";
-                tooltip-text: "Scan for devices";
-                clicked => $on_scan_clicked() swapped;
-
-                styles [
-                  "flat",
-                ]
-              }
+              styles [
+                "flat",
+              ]
             };
 
             Gtk.ListBox discovered_listbox {

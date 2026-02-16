@@ -1,9 +1,10 @@
 use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::glib;
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
+use std::rc::Rc;
 
-use crate::backend::bluetooth::BtDevice;
+use crate::backend::bluetooth::{BtDevice, BtDeviceState};
 use crate::backend::WlcontrolManager;
 use crate::ui::BluetoothDeviceRow;
 
@@ -28,8 +29,6 @@ mod imp {
         #[template_child]
         pub paired_listbox: TemplateChild<gtk::ListBox>,
         #[template_child]
-        pub scan_spinner: TemplateChild<gtk::Spinner>,
-        #[template_child]
         pub scan_button: TemplateChild<gtk::Button>,
         #[template_child]
         pub discovered_listbox: TemplateChild<gtk::ListBox>,
@@ -40,6 +39,11 @@ mod imp {
         pub connected_filter: OnceCell<gtk::FilterListModel>,
         pub paired_filter: OnceCell<gtk::FilterListModel>,
         pub discovered_filter: OnceCell<gtk::FilterListModel>,
+
+        // Custom filters (for invalidation on property changes)
+        pub connected_custom_filter: OnceCell<gtk::CustomFilter>,
+        pub paired_custom_filter: OnceCell<gtk::CustomFilter>,
+        pub discovered_custom_filter: OnceCell<gtk::CustomFilter>,
     }
 
     #[glib::object_subclass]
@@ -64,7 +68,11 @@ mod imp {
         #[template_callback]
         fn on_scan_clicked(&self, _button: &gtk::Button) {
             if let Some(manager) = self.manager.get() {
-                manager.request_bt_scan();
+                if manager.bt_discovering() {
+                    manager.request_bt_stop_scan();
+                } else {
+                    manager.request_bt_scan();
+                }
             }
         }
     }
@@ -107,29 +115,34 @@ impl BluetoothPage {
         let imp = self.imp();
         imp.manager.set(manager.clone()).unwrap();
 
-        // Bind discovering state to spinner
-        manager
-            .bind_property("bt-discovering", &*imp.scan_spinner, "visible")
-            .sync_create()
-            .build();
-
-        manager
-            .bind_property("bt-discovering", &*imp.scan_spinner, "spinning")
-            .sync_create()
-            .build();
-
-        // Hide scan button while discovering
-        manager
-            .bind_property("bt-discovering", &*imp.scan_button, "visible")
-            .sync_create()
-            .invert_boolean()
-            .build();
+        // Spin the refresh icon while discovering
+        let scan_button = imp.scan_button.clone();
+        manager.connect_notify_local(
+            Some("bt-discovering"),
+            move |manager, _| {
+                if manager.bt_discovering() {
+                    scan_button.add_css_class("scanning");
+                } else {
+                    scan_button.remove_css_class("scanning");
+                }
+            },
+        );
 
         // Bind adapter power state
         manager
             .bind_property("bt-powered", &*imp.adapter_switch, "active")
             .sync_create()
             .bidirectional()
+            .build();
+
+        // Disable controls when BT is off
+        manager
+            .bind_property("bt-powered", &*imp.discoverable_switch, "sensitive")
+            .sync_create()
+            .build();
+        manager
+            .bind_property("bt-powered", &*imp.scan_button, "sensitive")
+            .sync_create()
             .build();
 
         // Bind discoverable state
@@ -145,22 +158,53 @@ impl BluetoothPage {
         // Connected devices filter
         let connected_filter =
             gtk::CustomFilter::new(|item| item.downcast_ref::<BtDevice>().unwrap().connected());
-        let connected_model = gtk::FilterListModel::new(Some(devices.clone()), Some(connected_filter));
+        let connected_model =
+            gtk::FilterListModel::new(Some(devices.clone()), Some(connected_filter.clone()));
         imp.connected_filter.set(connected_model.clone()).unwrap();
+        imp.connected_custom_filter
+            .set(connected_filter.clone())
+            .unwrap();
 
         // Paired (but not connected) devices filter
         let paired_filter = gtk::CustomFilter::new(|item| {
             let device = item.downcast_ref::<BtDevice>().unwrap();
             device.paired() && !device.connected()
         });
-        let paired_model = gtk::FilterListModel::new(Some(devices.clone()), Some(paired_filter));
+        let paired_model =
+            gtk::FilterListModel::new(Some(devices.clone()), Some(paired_filter.clone()));
         imp.paired_filter.set(paired_model.clone()).unwrap();
+        imp.paired_custom_filter
+            .set(paired_filter.clone())
+            .unwrap();
 
         // Discovered (not paired) devices filter
         let discovered_filter =
             gtk::CustomFilter::new(|item| !item.downcast_ref::<BtDevice>().unwrap().paired());
-        let discovered_model = gtk::FilterListModel::new(Some(devices.clone()), Some(discovered_filter));
+        let discovered_model =
+            gtk::FilterListModel::new(Some(devices.clone()), Some(discovered_filter.clone()));
         imp.discovered_filter.set(discovered_model.clone()).unwrap();
+        imp.discovered_custom_filter
+            .set(discovered_filter.clone())
+            .unwrap();
+
+        // Invalidate filters when device properties change
+        manager.connect_closure(
+            "bt-device-updated",
+            false,
+            glib::closure_local!(
+                #[weak]
+                connected_filter,
+                #[weak]
+                paired_filter,
+                #[weak]
+                discovered_filter,
+                move |_manager: WlcontrolManager| {
+                    connected_filter.changed(gtk::FilterChange::Different);
+                    paired_filter.changed(gtk::FilterChange::Different);
+                    discovered_filter.changed(gtk::FilterChange::Different);
+                }
+            ),
+        );
 
         // Bind visibility of groups to whether they have items
         connected_model.connect_items_changed(glib::clone!(
@@ -183,6 +227,164 @@ impl BluetoothPage {
         Self::bind_device_list(&imp.connected_listbox, &connected_model, manager);
         Self::bind_device_list(&imp.paired_listbox, &paired_model, manager);
         Self::bind_device_list(&imp.discovered_listbox, &discovered_model, manager);
+
+        // Handle errors
+        manager.connect_closure(
+            "error",
+            false,
+            glib::closure_local!(
+                #[weak(rename_to = page)]
+                self,
+                move |_manager: WlcontrolManager, message: String| {
+                    page.show_toast(&message);
+                }
+            ),
+        );
+
+        // Handle all BT pairing interactions
+        let page = self.clone();
+        let pairing_dialog: Rc<RefCell<Option<adw::AlertDialog>>> = Rc::new(RefCell::new(None));
+        let pd = pairing_dialog.clone();
+        manager.connect_closure(
+            "bt-pairing",
+            false,
+            glib::closure_local!(
+                #[watch]
+                page,
+                move |manager: WlcontrolManager, kind: String, _address: String, code: String| {
+                    let (heading, body, responses, needs_input) = match kind.as_str() {
+                        "confirm-passkey" => (
+                            "Bluetooth Pairing",
+                            format!("Confirm that the other device is showing this code:\n\n<big><b>{}</b></big>", code),
+                            vec![("cancel", "Cancel", false), ("confirm", "Confirm", true)],
+                            None,
+                        ),
+                        "request-pin" => (
+                            "Bluetooth Pairing",
+                            "Enter PIN code for the device".to_string(),
+                            vec![("cancel", "Cancel", false), ("confirm", "Pair", true)],
+                            Some("PIN Code"),
+                        ),
+                        "request-passkey" => (
+                            "Bluetooth Pairing",
+                            "Enter the passkey shown on the device (0\u{2013}999999)".to_string(),
+                            vec![("cancel", "Cancel", false), ("confirm", "Pair", true)],
+                            Some("Passkey"),
+                        ),
+                        "display-passkey" => (
+                            "Bluetooth Pairing",
+                            format!("Enter this passkey on the device:\n\n<big><b>{}</b></big>", code),
+                            vec![("ok", "OK", true)],
+                            None,
+                        ),
+                        "display-pin" => (
+                            "Bluetooth Pairing",
+                            format!("Enter this PIN on the device:\n\n<big><b>{}</b></big>",
+                                glib::markup_escape_text(&code)),
+                            vec![("ok", "OK", true)],
+                            None,
+                        ),
+                        "authorize" => (
+                            "Bluetooth Pairing",
+                            "Allow this device to connect?".to_string(),
+                            vec![("cancel", "Deny", false), ("allow", "Allow", true)],
+                            None,
+                        ),
+                        _ => return,
+                    };
+
+                    let dialog = adw::AlertDialog::builder()
+                        .heading(heading)
+                        .body(&body)
+                        .body_use_markup(true)
+                        .close_response(responses[0].0)
+                        .build();
+                    for &(id, label, suggested) in &responses {
+                        dialog.add_response(id, label);
+                        if suggested {
+                            dialog.set_response_appearance(id, adw::ResponseAppearance::Suggested);
+                            dialog.set_default_response(Some(id));
+                        }
+                    }
+
+                    let entry = if let Some(title) = needs_input {
+                        let entry = adw::EntryRow::builder().title(title).build();
+                        let group = adw::PreferencesGroup::new();
+                        group.add(&entry);
+                        dialog.set_extra_child(Some(&group));
+                        dialog.set_response_enabled("confirm", false);
+                        let kind2 = kind.clone();
+                        entry.connect_changed(glib::clone!(
+                            #[weak]
+                            dialog,
+                            move |entry| {
+                                let valid = match kind2.as_str() {
+                                    "request-passkey" => {
+                                        entry.text().parse::<u32>().is_ok() && entry.text().len() <= 6
+                                    }
+                                    _ => !entry.text().is_empty(),
+                                };
+                                dialog.set_response_enabled("confirm", valid);
+                            }
+                        ));
+                        Some(entry)
+                    } else {
+                        None
+                    };
+
+                    pd.replace(Some(dialog.clone()));
+                    let pd2 = pd.clone();
+
+                    glib::spawn_future_local(glib::clone!(
+                        #[weak]
+                        manager,
+                        #[weak]
+                        page,
+                        async move {
+                            let response = dialog.choose_future(Some(&page)).await;
+                            pd2.replace(None);
+                            match kind.as_str() {
+                                "confirm-passkey" => {
+                                    manager.send_bt_pairing_response(response == "confirm");
+                                }
+                                "authorize" => {
+                                    manager.send_bt_pairing_response(response == "allow");
+                                }
+                                "request-pin" => {
+                                    let pin = if response == "confirm" {
+                                        entry.map(|e| e.text().to_string())
+                                    } else {
+                                        None
+                                    };
+                                    manager.send_bt_pairing_pin(pin);
+                                }
+                                "request-passkey" => {
+                                    let passkey = if response == "confirm" {
+                                        entry.and_then(|e| e.text().parse::<u32>().ok())
+                                    } else {
+                                        None
+                                    };
+                                    manager.send_bt_pairing_passkey(passkey);
+                                }
+                                _ => {} // display-only, no response needed
+                            }
+                        }
+                    ));
+                }
+            ),
+        );
+
+        // Close pairing dialog when BT is turned off
+        manager.connect_notify_local(
+            Some("bt-powered"),
+            move |manager, _| {
+                if !manager.bt_powered() {
+                    if let Some(dialog) = pairing_dialog.take() {
+                        dialog.force_close();
+                    }
+                }
+            },
+        );
     }
 
     fn bind_device_list(
@@ -206,15 +408,32 @@ impl BluetoothPage {
                         #[weak]
                         device,
                         move |_| {
-                            if device.connected() {
-                                manager.request_bt_disconnect(&device.path());
-                            } else if device.paired() {
-                                manager.request_bt_connect(&device.path());
-                            } else {
-                                manager.request_bt_pair(&device.path());
+                            match device.state() {
+                                BtDeviceState::Discovered => manager.request_bt_pair(&device.path()),
+                                BtDeviceState::Paired => manager.request_bt_connect(&device.path()),
+                                BtDeviceState::Connected => manager.request_bt_disconnect(&device.path()),
+                                // In-progress states: ignore clicks
+                                BtDeviceState::Pairing
+                                | BtDeviceState::Connecting
+                                | BtDeviceState::Disconnecting
+                                | BtDeviceState::Removing => {}
                             }
                         }
                     ));
+
+                    row.connect_closure(
+                        "remove-clicked",
+                        false,
+                        glib::closure_local!(
+                            #[weak]
+                            manager,
+                            #[weak]
+                            device,
+                            move |_row: BluetoothDeviceRow| {
+                                manager.request_bt_remove(&device.path());
+                            }
+                        ),
+                    );
 
                     row.upcast()
                 }

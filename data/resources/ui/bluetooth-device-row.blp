@@ -38,17 +38,26 @@ template $BluetoothDeviceRow: Adw.ActionRow {
   }
 
   [suffix]
-  Gtk.Spinner connecting_spinner {
+  Gtk.Image connecting_indicator {
+    icon-name: "media-record-symbolic";
     visible: false;
+
+    styles [
+      "connecting-pulse",
+      "accent",
+    ]
   }
 
   [suffix]
-  Gtk.Button action_button {
+  Gtk.Button remove_button {
+    icon-name: "edit-clear-symbolic";
+    tooltip-text: "Remove device";
     valign: center;
     visible: false;
 
     styles [
       "flat",
+      "circular",
     ]
   }
 }

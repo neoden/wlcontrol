@@ -1,3 +1,5 @@
+pub mod backend;
 mod device;
 
-pub use device::BtDevice;
+pub use backend::BluetoothBackend;
+pub use device::{BtDevice, BtDeviceState};

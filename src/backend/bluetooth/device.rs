@@ -4,6 +4,20 @@ use gtk::glib;
 use std::cell::{Cell, RefCell};
 use std::sync::OnceLock;
 
+/// Canonical device state, derived from BlueZ properties + local operation flags.
+/// Local operations take priority: if user clicked "forget", state is Removing
+/// even though BlueZ still reports paired=true.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BtDeviceState {
+    Discovered,
+    Pairing,
+    Paired,
+    Connecting,
+    Connected,
+    Disconnecting,
+    Removing,
+}
+
 mod imp {
     use super::*;
 
@@ -17,6 +31,9 @@ mod imp {
         pub paired: Cell<bool>,
         pub trusted: Cell<bool>,
         pub connected: Cell<bool>,
+        pub connecting: Cell<bool>,
+        pub disconnecting: Cell<bool>,
+        pub removing: Cell<bool>,
         pub battery_percentage: Cell<i32>, // -1 if not available
     }
 
@@ -44,6 +61,15 @@ mod imp {
                     glib::ParamSpecBoolean::builder("connected")
                         .read_only()
                         .build(),
+                    glib::ParamSpecBoolean::builder("connecting")
+                        .read_only()
+                        .build(),
+                    glib::ParamSpecBoolean::builder("disconnecting")
+                        .read_only()
+                        .build(),
+                    glib::ParamSpecBoolean::builder("removing")
+                        .read_only()
+                        .build(),
                     glib::ParamSpecInt::builder("battery-percentage")
                         .minimum(-1)
                         .maximum(100)
@@ -64,6 +90,9 @@ mod imp {
                 "paired" => self.paired.get().to_value(),
                 "trusted" => self.trusted.get().to_value(),
                 "connected" => self.connected.get().to_value(),
+                "connecting" => self.connecting.get().to_value(),
+                "disconnecting" => self.disconnecting.get().to_value(),
+                "removing" => self.removing.get().to_value(),
                 "battery-percentage" => self.battery_percentage.get().to_value(),
                 _ => unimplemented!(),
             }
@@ -139,6 +168,10 @@ impl BtDevice {
         self.imp().connected.get()
     }
 
+    pub fn connecting(&self) -> bool {
+        self.imp().connecting.get()
+    }
+
     pub fn battery_percentage(&self) -> i32 {
         self.imp().battery_percentage.get()
     }
@@ -161,6 +194,13 @@ impl BtDevice {
         }
     }
 
+    pub fn set_icon(&self, icon: &str) {
+        if *self.imp().icon.borrow() != icon {
+            self.imp().icon.replace(icon.to_string());
+            self.notify("icon");
+        }
+    }
+
     pub fn set_paired(&self, paired: bool) {
         if self.imp().paired.get() != paired {
             self.imp().paired.set(paired);
@@ -180,6 +220,60 @@ impl BtDevice {
             self.imp().connected.set(connected);
             self.notify("connected");
         }
+    }
+
+    pub fn set_connecting(&self, connecting: bool) {
+        if self.imp().connecting.get() != connecting {
+            self.imp().connecting.set(connecting);
+            self.notify("connecting");
+        }
+    }
+
+    pub fn disconnecting(&self) -> bool {
+        self.imp().disconnecting.get()
+    }
+
+    pub fn set_disconnecting(&self, disconnecting: bool) {
+        if self.imp().disconnecting.get() != disconnecting {
+            self.imp().disconnecting.set(disconnecting);
+            self.notify("disconnecting");
+        }
+    }
+
+    pub fn removing(&self) -> bool {
+        self.imp().removing.get()
+    }
+
+    pub fn set_removing(&self, removing: bool) {
+        if self.imp().removing.get() != removing {
+            self.imp().removing.set(removing);
+            self.notify("removing");
+        }
+    }
+
+    /// Derive canonical state from BlueZ properties + local operation flags.
+    /// Priority: local operations > BlueZ state.
+    pub fn state(&self) -> BtDeviceState {
+        if self.removing() {
+            return BtDeviceState::Removing;
+        }
+        if self.disconnecting() {
+            return BtDeviceState::Disconnecting;
+        }
+        if self.connecting() {
+            return if self.paired() {
+                BtDeviceState::Connecting
+            } else {
+                BtDeviceState::Pairing
+            };
+        }
+        if self.connected() {
+            return BtDeviceState::Connected;
+        }
+        if self.paired() {
+            return BtDeviceState::Paired;
+        }
+        BtDeviceState::Discovered
     }
 
     pub fn set_battery_percentage(&self, percentage: i32) {
