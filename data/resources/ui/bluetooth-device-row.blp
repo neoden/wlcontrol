@@ -1,0 +1,54 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $BluetoothDeviceRow: Adw.ActionRow {
+  activatable: true;
+
+  [prefix]
+  Gtk.Image device_icon {
+    icon-name: "bluetooth-symbolic";
+  }
+
+  [suffix]
+  Gtk.Box battery_box {
+    visible: false;
+    spacing: 4;
+
+    Gtk.Image battery_icon {
+      icon-name: "battery-full-symbolic";
+    }
+
+    Gtk.Label battery_label {
+      label: "100%";
+
+      styles [
+        "dim-label",
+      ]
+    }
+  }
+
+  [suffix]
+  Gtk.Image connected_icon {
+    icon-name: "emblem-ok-symbolic";
+    visible: false;
+
+    styles [
+      "success",
+    ]
+  }
+
+  [suffix]
+  Gtk.Spinner connecting_spinner {
+    visible: false;
+  }
+
+  [suffix]
+  Gtk.Button action_button {
+    valign: center;
+    visible: false;
+
+    styles [
+      "flat",
+    ]
+  }
+}

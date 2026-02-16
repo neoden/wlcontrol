@@ -1,0 +1,218 @@
+use adw::prelude::*;
+use adw::subclass::prelude::*;
+use gtk::glib;
+use std::cell::{Cell, RefCell};
+use std::sync::OnceLock;
+
+mod imp {
+    use super::*;
+
+    #[derive(Default)]
+    pub struct BtDevice {
+        pub path: RefCell<String>,
+        pub address: RefCell<String>,
+        pub name: RefCell<String>,
+        pub alias: RefCell<String>,
+        pub icon: RefCell<String>,
+        pub paired: Cell<bool>,
+        pub trusted: Cell<bool>,
+        pub connected: Cell<bool>,
+        pub battery_percentage: Cell<i32>, // -1 if not available
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for BtDevice {
+        const NAME: &'static str = "BtDevice";
+        type Type = super::BtDevice;
+        type ParentType = glib::Object;
+    }
+
+    impl ObjectImpl for BtDevice {
+        fn properties() -> &'static [glib::ParamSpec] {
+            static PROPERTIES: OnceLock<Vec<glib::ParamSpec>> = OnceLock::new();
+            PROPERTIES.get_or_init(|| {
+                vec![
+                    glib::ParamSpecString::builder("path").read_only().build(),
+                    glib::ParamSpecString::builder("address").read_only().build(),
+                    glib::ParamSpecString::builder("name").read_only().build(),
+                    glib::ParamSpecString::builder("alias").read_only().build(),
+                    glib::ParamSpecString::builder("icon").read_only().build(),
+                    glib::ParamSpecBoolean::builder("paired").read_only().build(),
+                    glib::ParamSpecBoolean::builder("trusted")
+                        .read_only()
+                        .build(),
+                    glib::ParamSpecBoolean::builder("connected")
+                        .read_only()
+                        .build(),
+                    glib::ParamSpecInt::builder("battery-percentage")
+                        .minimum(-1)
+                        .maximum(100)
+                        .default_value(-1)
+                        .read_only()
+                        .build(),
+                ]
+            })
+        }
+
+        fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
+            match pspec.name() {
+                "path" => self.path.borrow().to_value(),
+                "address" => self.address.borrow().to_value(),
+                "name" => self.name.borrow().to_value(),
+                "alias" => self.alias.borrow().to_value(),
+                "icon" => self.icon.borrow().to_value(),
+                "paired" => self.paired.get().to_value(),
+                "trusted" => self.trusted.get().to_value(),
+                "connected" => self.connected.get().to_value(),
+                "battery-percentage" => self.battery_percentage.get().to_value(),
+                _ => unimplemented!(),
+            }
+        }
+    }
+}
+
+glib::wrapper! {
+    pub struct BtDevice(ObjectSubclass<imp::BtDevice>);
+}
+
+impl BtDevice {
+    pub fn new(
+        path: &str,
+        address: &str,
+        name: &str,
+        icon: &str,
+        paired: bool,
+        connected: bool,
+    ) -> Self {
+        let device: Self = glib::Object::new();
+        let imp = device.imp();
+        imp.path.replace(path.to_string());
+        imp.address.replace(address.to_string());
+        imp.name.replace(name.to_string());
+        imp.alias.replace(name.to_string());
+        imp.icon.replace(icon.to_string());
+        imp.paired.set(paired);
+        imp.connected.set(connected);
+        imp.battery_percentage.set(-1);
+        device
+    }
+
+    pub fn path(&self) -> String {
+        self.imp().path.borrow().clone()
+    }
+
+    pub fn address(&self) -> String {
+        self.imp().address.borrow().clone()
+    }
+
+    pub fn name(&self) -> String {
+        self.imp().name.borrow().clone()
+    }
+
+    pub fn display_name(&self) -> String {
+        let alias = self.imp().alias.borrow();
+        if !alias.is_empty() {
+            alias.clone()
+        } else {
+            let name = self.imp().name.borrow();
+            if !name.is_empty() {
+                name.clone()
+            } else {
+                self.imp().address.borrow().clone()
+            }
+        }
+    }
+
+    pub fn icon(&self) -> String {
+        self.imp().icon.borrow().clone()
+    }
+
+    pub fn paired(&self) -> bool {
+        self.imp().paired.get()
+    }
+
+    pub fn trusted(&self) -> bool {
+        self.imp().trusted.get()
+    }
+
+    pub fn connected(&self) -> bool {
+        self.imp().connected.get()
+    }
+
+    pub fn battery_percentage(&self) -> i32 {
+        self.imp().battery_percentage.get()
+    }
+
+    pub fn has_battery(&self) -> bool {
+        self.battery_percentage() >= 0
+    }
+
+    pub fn set_name(&self, name: &str) {
+        if *self.imp().name.borrow() != name {
+            self.imp().name.replace(name.to_string());
+            self.notify("name");
+        }
+    }
+
+    pub fn set_alias(&self, alias: &str) {
+        if *self.imp().alias.borrow() != alias {
+            self.imp().alias.replace(alias.to_string());
+            self.notify("alias");
+        }
+    }
+
+    pub fn set_paired(&self, paired: bool) {
+        if self.imp().paired.get() != paired {
+            self.imp().paired.set(paired);
+            self.notify("paired");
+        }
+    }
+
+    pub fn set_trusted(&self, trusted: bool) {
+        if self.imp().trusted.get() != trusted {
+            self.imp().trusted.set(trusted);
+            self.notify("trusted");
+        }
+    }
+
+    pub fn set_connected(&self, connected: bool) {
+        if self.imp().connected.get() != connected {
+            self.imp().connected.set(connected);
+            self.notify("connected");
+        }
+    }
+
+    pub fn set_battery_percentage(&self, percentage: i32) {
+        if self.imp().battery_percentage.get() != percentage {
+            self.imp().battery_percentage.set(percentage);
+            self.notify("battery-percentage");
+        }
+    }
+
+    /// Returns appropriate icon name based on device type
+    pub fn device_icon(&self) -> &'static str {
+        let icon = self.imp().icon.borrow();
+        match icon.as_str() {
+            "audio-card" | "audio-headphones" | "audio-headset" => "audio-headphones-symbolic",
+            "input-keyboard" => "input-keyboard-symbolic",
+            "input-mouse" => "input-mouse-symbolic",
+            "input-gaming" => "input-gaming-symbolic",
+            "phone" => "phone-symbolic",
+            "computer" => "computer-symbolic",
+            _ => "bluetooth-symbolic",
+        }
+    }
+
+    /// Returns battery icon based on percentage
+    pub fn battery_icon(&self) -> &'static str {
+        match self.battery_percentage() {
+            90..=100 => "battery-level-100-symbolic",
+            70..=89 => "battery-level-80-symbolic",
+            50..=69 => "battery-level-60-symbolic",
+            30..=49 => "battery-level-40-symbolic",
+            10..=29 => "battery-level-20-symbolic",
+            0..=9 => "battery-level-0-symbolic",
+            _ => "battery-missing-symbolic",
+        }
+    }
+}

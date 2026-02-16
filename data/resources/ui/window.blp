@@ -1,0 +1,42 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $WlcontrolWindow: Adw.ApplicationWindow {
+  title: "Wireless Control";
+  default-width: 450;
+  default-height: 600;
+
+  content: Adw.ToolbarView {
+    [top]
+    Adw.HeaderBar {
+      [title]
+      Adw.ViewSwitcher {
+        stack: stack;
+        policy: wide;
+      }
+    }
+
+    content: Adw.ViewStack stack {
+      Adw.ViewStackPage {
+        name: "wifi";
+        title: "WiFi";
+        icon-name: "network-wireless-symbolic";
+
+        child: $WifiPage wifi_page {};
+      }
+
+      Adw.ViewStackPage {
+        name: "bluetooth";
+        title: "Bluetooth";
+        icon-name: "bluetooth-symbolic";
+
+        child: $BluetoothPage bluetooth_page {};
+      }
+    };
+
+    [bottom]
+    Adw.ViewSwitcherBar {
+      stack: stack;
+    }
+  };
+}

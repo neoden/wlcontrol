@@ -1,0 +1,94 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $BluetoothPage: Adw.Bin {
+  child: Adw.ToastOverlay toast_overlay {
+    child: Gtk.ScrolledWindow {
+      hscrollbar-policy: never;
+      vexpand: true;
+
+      child: Adw.Clamp {
+        maximum-size: 600;
+        margin-top: 24;
+        margin-bottom: 24;
+        margin-start: 12;
+        margin-end: 12;
+
+        child: Gtk.Box {
+          orientation: vertical;
+          spacing: 24;
+
+          Adw.PreferencesGroup adapter_group {
+            title: "Adapter";
+
+            Adw.SwitchRow adapter_switch {
+              title: "Bluetooth";
+              subtitle: "Enable Bluetooth adapter";
+            }
+
+            Adw.SwitchRow discoverable_switch {
+              title: "Discoverable";
+              subtitle: "Allow other devices to find this device";
+            }
+          }
+
+          Adw.PreferencesGroup connected_group {
+            title: "Connected";
+            visible: false;
+
+            Gtk.ListBox connected_listbox {
+              selection-mode: none;
+
+              styles [
+                "boxed-list",
+              ]
+            }
+          }
+
+          Adw.PreferencesGroup paired_group {
+            title: "Paired Devices";
+            visible: false;
+
+            Gtk.ListBox paired_listbox {
+              selection-mode: none;
+
+              styles [
+                "boxed-list",
+              ]
+            }
+          }
+
+          Adw.PreferencesGroup discovered_group {
+            title: "Available Devices";
+
+            header-suffix: Gtk.Box {
+              spacing: 6;
+
+              Gtk.Spinner scan_spinner {
+                visible: false;
+              }
+
+              Gtk.Button scan_button {
+                icon-name: "view-refresh-symbolic";
+                tooltip-text: "Scan for devices";
+                clicked => $on_scan_clicked() swapped;
+
+                styles [
+                  "flat",
+                ]
+              }
+            };
+
+            Gtk.ListBox discovered_listbox {
+              selection-mode: none;
+
+              styles [
+                "boxed-list",
+              ]
+            }
+          }
+        };
+      };
+    };
+  };
+}

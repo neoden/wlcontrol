@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/dev/neoden/wlcontrol">
+    <file>style.css</file>
+    <file preprocess="xml-stripblanks">ui/window.ui</file>
+    <file preprocess="xml-stripblanks">ui/wifi-page.ui</file>
+    <file preprocess="xml-stripblanks">ui/bluetooth-page.ui</file>
+    <file preprocess="xml-stripblanks">ui/wifi-network-row.ui</file>
+    <file preprocess="xml-stripblanks">ui/bluetooth-device-row.ui</file>
+    <file preprocess="xml-stripblanks">ui/password-dialog.ui</file>
+  </gresource>
+</gresources>

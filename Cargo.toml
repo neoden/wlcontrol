@@ -1,0 +1,20 @@
+[package]
+name = "wlcontrol"
+version = "0.1.0"
+edition = "2021"
+authors = ["neoden"]
+description = "WiFi and Bluetooth control app using iwd and BlueZ"
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.10", features = ["v4_16"] }
+adw = { package = "libadwaita", version = "0.8", features = ["v1_6"] }
+zbus = { version = "4.4", default-features = false, features = ["tokio"] }
+bluer = { version = "0.17", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
+async-channel = "2"
+futures = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[build-dependencies]
+glib-build-tools = "0.21"

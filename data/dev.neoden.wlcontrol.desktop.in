@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Wireless Control
+Comment=Manage WiFi and Bluetooth connections
+Exec=wlcontrol
+Icon=dev.neoden.wlcontrol
+Terminal=false
+Type=Application
+Categories=Settings;Network;
+Keywords=WiFi;Bluetooth;Network;Wireless;

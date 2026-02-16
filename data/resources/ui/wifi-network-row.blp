@@ -1,0 +1,51 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $WifiNetworkRow: Adw.ActionRow {
+  activatable: true;
+
+  [prefix]
+  Gtk.Image signal_icon {
+    icon-name: "network-wireless-signal-excellent-symbolic";
+  }
+
+  [prefix]
+  Gtk.Image security_icon {
+    icon-name: "network-wireless-encrypted-symbolic";
+    visible: false;
+  }
+
+  [suffix]
+  Gtk.Image connected_icon {
+    icon-name: "emblem-ok-symbolic";
+    visible: false;
+
+    styles [
+      "success",
+    ]
+  }
+
+  [suffix]
+  Gtk.Image connecting_indicator {
+    icon-name: "media-record-symbolic";
+    visible: false;
+
+    styles [
+      "connecting-pulse",
+      "accent",
+    ]
+  }
+
+  [suffix]
+  Gtk.Button forget_button {
+    icon-name: "edit-clear-symbolic";
+    tooltip-text: "Forget network";
+    visible: false;
+    valign: center;
+
+    styles [
+      "flat",
+      "circular",
+    ]
+  }
+}
