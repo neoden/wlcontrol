@@ -154,30 +154,6 @@ pub async fn find_all_iwd_devices(
     Ok(devices)
 }
 
-/// Check if Station interface exists (only when powered)
-pub async fn has_station_interface(conn: &zbus::Connection, device_path: &OwnedObjectPath) -> bool {
-    use zbus::fdo::ObjectManagerProxy;
-
-    let obj_manager = match ObjectManagerProxy::builder(conn)
-        .destination("net.connman.iwd")
-        .and_then(|b| b.path("/"))
-    {
-        Ok(builder) => match builder.build().await {
-            Ok(proxy) => proxy,
-            Err(_) => return false,
-        },
-        Err(_) => return false,
-    };
-
-    let Ok(objects) = obj_manager.get_managed_objects().await else {
-        return false;
-    };
-
-    objects
-        .get(device_path)
-        .map(|ifaces| ifaces.contains_key("net.connman.iwd.Station"))
-        .unwrap_or(false)
-}
 
 /// Get list of WiFi networks from iwd Station
 pub async fn get_wifi_networks(
@@ -334,9 +310,6 @@ impl WifiBackend {
     /// Get StationProxy if device is powered and Station interface exists
     async fn station(&self) -> Option<StationProxy<'static>> {
         let path = self.device_path.as_ref()?;
-        if !has_station_interface(&self.conn, path).await {
-            return None;
-        }
         StationProxy::builder(&self.conn)
             .path(path.clone())
             .ok()?
@@ -351,7 +324,7 @@ impl WifiBackend {
         tracing::info!("Starting WiFi scan");
         if let Err(e) = station.scan().await {
             tracing::error!("Scan failed: {}", e);
-            let _ = self.evt_tx.send(BackendEvent::Error(format!("Scan: {}", e))).await;
+            let _ = self.evt_tx.send(BackendEvent::WifiError(format!("Scan: {}", e))).await;
         }
     }
 
@@ -383,7 +356,7 @@ impl WifiBackend {
                 Err(e) => {
                     tracing::error!("{}", e);
                     let _ = evt_tx.send(BackendEvent::WifiConnected(None)).await;
-                    let _ = evt_tx.send(BackendEvent::Error("Invalid network path".into())).await;
+                    let _ = evt_tx.send(BackendEvent::WifiError("Invalid network path".into())).await;
                     return;
                 }
             };
@@ -409,13 +382,13 @@ impl WifiBackend {
                     // Query actual state from iwd to preserve existing connection
                     let actual_connected = Self::get_connected_network_static(&conn, device_path.as_ref()).await;
                     let _ = evt_tx.send(BackendEvent::WifiConnected(actual_connected)).await;
-                    let _ = evt_tx.send(BackendEvent::Error(format_iwd_error(&e))).await;
+                    let _ = evt_tx.send(BackendEvent::WifiError(format_iwd_error(&e))).await;
                 }
                 Err(_) => {
                     tracing::error!("Connect timed out for {}", path);
                     let actual_connected = Self::get_connected_network_static(&conn, device_path.as_ref()).await;
                     let _ = evt_tx.send(BackendEvent::WifiConnected(actual_connected)).await;
-                    let _ = evt_tx.send(BackendEvent::Error("Connection timed out".into())).await;
+                    let _ = evt_tx.send(BackendEvent::WifiError("Connection timed out".into())).await;
                 }
             }
 
@@ -435,9 +408,6 @@ impl WifiBackend {
         device_path: Option<&OwnedObjectPath>,
     ) -> Option<String> {
         let path = device_path?;
-        if !has_station_interface(conn, path).await {
-            return None;
-        }
         let station = StationProxy::builder(conn)
             .path(path.clone())
             .ok()?
@@ -467,7 +437,7 @@ impl WifiBackend {
             }
             Err(e) => {
                 tracing::error!("Disconnect failed: {}", e);
-                let _ = self.evt_tx.send(BackendEvent::Error(format!("Disconnect: {}", e))).await;
+                let _ = self.evt_tx.send(BackendEvent::WifiError(format!("Disconnect: {}", e))).await;
             }
         }
     }
@@ -480,7 +450,7 @@ impl WifiBackend {
             Ok(n) => n,
             Err(e) => {
                 tracing::error!("{}", e);
-                let _ = self.evt_tx.send(BackendEvent::Error("Invalid network path".into())).await;
+                let _ = self.evt_tx.send(BackendEvent::WifiError("Invalid network path".into())).await;
                 return;
             }
         };
@@ -489,7 +459,7 @@ impl WifiBackend {
             Ok(p) => p,
             Err(e) => {
                 tracing::error!("Network is not known: {}", e);
-                let _ = self.evt_tx.send(BackendEvent::Error("Network is not saved".into())).await;
+                let _ = self.evt_tx.send(BackendEvent::WifiError("Network is not saved".into())).await;
                 return;
             }
         };
@@ -498,7 +468,7 @@ impl WifiBackend {
             Ok(k) => k,
             Err(e) => {
                 tracing::error!("{}", e);
-                let _ = self.evt_tx.send(BackendEvent::Error("Failed to forget network".into())).await;
+                let _ = self.evt_tx.send(BackendEvent::WifiError("Failed to forget network".into())).await;
                 return;
             }
         };
@@ -511,7 +481,7 @@ impl WifiBackend {
             }
             Err(e) => {
                 tracing::error!("Forget failed: {}", e);
-                let _ = self.evt_tx.send(BackendEvent::Error(format!("Forget: {}", e))).await;
+                let _ = self.evt_tx.send(BackendEvent::WifiError(format!("Forget: {}", e))).await;
             }
         }
     }
@@ -527,6 +497,7 @@ impl WifiBackend {
             Ok(d) => d,
             Err(e) => {
                 tracing::error!("{}", e);
+                let _ = self.evt_tx.send(BackendEvent::WifiError(format!("Power: {}", e))).await;
                 return;
             }
         };
@@ -534,7 +505,11 @@ impl WifiBackend {
         tracing::info!("Setting WiFi powered: {}", powered);
         if let Err(e) = device.set_powered(powered).await {
             tracing::error!("Set powered failed: {}", e);
-            let _ = self.evt_tx.send(BackendEvent::Error(format!("Power: {}", e))).await;
+            let _ = self.evt_tx.send(BackendEvent::WifiError(format!("Power: {}", e))).await;
+            // Send actual state back so UI can roll back the optimistic update
+            if let Ok(actual) = device.powered().await {
+                let _ = self.evt_tx.send(BackendEvent::WifiPowered(actual)).await;
+            }
         }
     }
 
@@ -547,7 +522,7 @@ impl WifiBackend {
             Ok(p) => p,
             Err(e) => {
                 tracing::error!("Invalid known network path: {}", e);
-                let _ = self.evt_tx.send(BackendEvent::Error("Invalid path".into())).await;
+                let _ = self.evt_tx.send(BackendEvent::WifiError("Invalid path".into())).await;
                 return;
             }
         };
@@ -556,7 +531,7 @@ impl WifiBackend {
             Ok(k) => k,
             Err(e) => {
                 tracing::error!("{}", e);
-                let _ = self.evt_tx.send(BackendEvent::Error("Failed to forget network".into())).await;
+                let _ = self.evt_tx.send(BackendEvent::WifiError("Failed to forget network".into())).await;
                 return;
             }
         };
@@ -569,7 +544,7 @@ impl WifiBackend {
             }
             Err(e) => {
                 tracing::error!("Forget known failed: {}", e);
-                let _ = self.evt_tx.send(BackendEvent::Error(format!("Forget: {}", e))).await;
+                let _ = self.evt_tx.send(BackendEvent::WifiError(format!("Forget: {}", e))).await;
             }
         }
     }

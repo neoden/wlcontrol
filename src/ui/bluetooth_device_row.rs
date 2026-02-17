@@ -1,6 +1,6 @@
 use adw::prelude::*;
 use adw::subclass::prelude::*;
-use gtk::{gdk, gio, glib};
+use gtk::{gio, glib};
 use std::cell::OnceCell;
 
 use crate::backend::bluetooth::{BtDevice, BtDeviceState};
@@ -158,10 +158,8 @@ impl BluetoothDeviceRow {
             #[weak]
             device,
             move |_, _| {
-                if let Some(display) = row.display().into() {
-                    let clipboard: gdk::Clipboard = display.clipboard();
-                    clipboard.set_text(&device.address());
-                }
+                let clipboard = row.display().clipboard();
+                clipboard.set_text(&device.address());
             }
         ));
         group.add_action(&copy_address);

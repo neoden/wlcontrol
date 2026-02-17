@@ -7,6 +7,7 @@ use std::sync::OnceLock;
 /// Canonical WiFi network state, derived from iwd properties + local operation flags.
 /// Local flags (connecting/disconnecting/forgetting) take priority over iwd state,
 /// giving instant UI feedback before the backend confirms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WifiNetworkState {
     Available,
     Saved,

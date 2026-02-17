@@ -1,7 +1,6 @@
 use adw::prelude::*;
 use adw::subclass::prelude::*;
 use async_channel::{Receiver, Sender};
-use futures::StreamExt;
 use gtk::{gio, glib};
 use std::sync::OnceLock;
 use tokio::runtime::Runtime;
@@ -24,12 +23,12 @@ fn runtime() -> &'static Runtime {
 pub enum BackendCommand {
     /// Shutdown the backend gracefully
     Shutdown,
-    WifiScan { device_path: String },
-    WifiConnect { device_path: String, path: String },
-    WifiDisconnect { device_path: String },
+    WifiScan,
+    WifiConnect { path: String },
+    WifiDisconnect,
     WifiForget { path: String },           // network path, backend will get known_network from it
     WifiForgetKnown { path: String },       // KnownNetwork D-Bus path, for saved-offline networks
-    WifiSetPowered { device_path: String, powered: bool },
+    WifiSetPowered { powered: bool },
     /// Switch to a different WiFi adapter (recreate backend + streams)
     WifiSwitchAdapter { device_path: String },
     /// Response to a passphrase request (None = cancelled)
@@ -85,6 +84,17 @@ pub struct BtDeviceData {
     pub rssi: i16,               // i16::MIN = no data
 }
 
+/// Kind of Bluetooth pairing interaction
+#[derive(Debug, Clone)]
+pub enum BtPairingKind {
+    ConfirmPasskey(String),
+    RequestPin,
+    RequestPasskey,
+    DisplayPasskey(String),
+    DisplayPin(String),
+    Authorize,
+}
+
 /// Events sent from backend to UI
 #[derive(Debug, Clone)]
 pub enum BackendEvent {
@@ -114,10 +124,9 @@ pub enum BackendEvent {
     BtDeviceAdded(BtDeviceData),
     BtDeviceChanged(BtDeviceData),
     BtDeviceRemoved(String), // address
-    /// Pairing interaction. kind: "confirm-passkey", "request-pin", "request-passkey",
-    /// "display-passkey", "display-pin", "authorize". code: passkey/pin or empty.
-    BtPairing { kind: String, address: String, code: String },
-    Error(String),
+    BtPairing { kind: BtPairingKind, address: String },
+    BtError(String),
+    WifiError(String),
 }
 
 mod imp {
@@ -251,9 +260,8 @@ mod imp {
                     self.wifi_powered.replace(powered);
                     if let Some(tx) = self.cmd_tx.get() {
                         let tx = tx.clone();
-                        let device_path = self.active_wifi_device.borrow().clone().unwrap_or_default();
                         glib::spawn_future_local(async move {
-                            let _ = tx.send(BackendCommand::WifiSetPowered { device_path, powered }).await;
+                            let _ = tx.send(BackendCommand::WifiSetPowered { powered }).await;
                         });
                     }
                 }
@@ -403,14 +411,26 @@ impl WlcontrolManager {
                 self.emit_by_name::<()>("bt-device-updated", &[]);
             }
             BackendEvent::BtDeviceRemoved(address) => self.remove_bt_device(&address),
-            BackendEvent::BtPairing { kind, address, code } => {
-                self.emit_by_name::<()>("bt-pairing", &[&kind, &address, &code]);
+            BackendEvent::BtPairing { kind, address } => {
+                let (kind_str, code) = match &kind {
+                    BtPairingKind::ConfirmPasskey(code) => ("confirm-passkey", code.as_str()),
+                    BtPairingKind::RequestPin => ("request-pin", ""),
+                    BtPairingKind::RequestPasskey => ("request-passkey", ""),
+                    BtPairingKind::DisplayPasskey(code) => ("display-passkey", code.as_str()),
+                    BtPairingKind::DisplayPin(code) => ("display-pin", code.as_str()),
+                    BtPairingKind::Authorize => ("authorize", ""),
+                };
+                self.emit_by_name::<()>("bt-pairing", &[&kind_str, &address, &code]);
             }
-            BackendEvent::Error(msg) => {
-                tracing::error!("Backend error: {}", msg);
+            BackendEvent::BtError(msg) => {
+                tracing::error!("BT error: {}", msg);
                 self.clear_bt_operations();
-                self.clear_wifi_operations();
                 self.emit_by_name::<()>("bt-device-updated", &[]);
+                self.emit_by_name::<()>("error", &[&msg]);
+            }
+            BackendEvent::WifiError(msg) => {
+                tracing::error!("WiFi error: {}", msg);
+                self.clear_wifi_operations();
                 self.emit_by_name::<()>("wifi-network-updated", &[]);
                 self.emit_by_name::<()>("error", &[&msg]);
             }
@@ -426,18 +446,38 @@ impl WlcontrolManager {
         self.imp().cached_visible.replace(visible);
 
         let store = &self.imp().wifi_networks;
-        store.remove_all();
-        for data in networks {
-            let network = WifiNetwork::new(
-                &data.path,
-                &data.name,
-                &data.network_type,
-                data.signal_strength,
-                data.connected,
-                data.known,
-            );
-            store.append(&network);
+
+        // Index existing GObjects by path for reuse
+        let mut existing: std::collections::HashMap<String, WifiNetwork> =
+            std::collections::HashMap::new();
+        for i in 0..store.n_items() {
+            let network = store.item(i).unwrap().downcast::<WifiNetwork>().unwrap();
+            existing.insert(network.path(), network);
         }
+
+        // Build new list, reusing existing GObjects (preserves operation flags)
+        let new_items: Vec<WifiNetwork> = networks
+            .iter()
+            .map(|data| {
+                if let Some(network) = existing.remove(&data.path) {
+                    network.set_signal_strength(data.signal_strength);
+                    network.set_connected(data.connected);
+                    network.set_known(data.known);
+                    network
+                } else {
+                    WifiNetwork::new(
+                        &data.path,
+                        &data.name,
+                        &data.network_type,
+                        data.signal_strength,
+                        data.connected,
+                        data.known,
+                    )
+                }
+            })
+            .collect();
+
+        store.splice(0, store.n_items(), &new_items);
     }
 
     /// Rebuild saved_networks store from cached known networks,
@@ -617,10 +657,6 @@ impl WlcontrolManager {
         }
     }
 
-    fn active_device_path(&self) -> String {
-        self.imp().active_wifi_device.borrow().clone().unwrap_or_default()
-    }
-
     pub fn wifi_adapters(&self) -> Vec<super::wifi_backend::IwdDeviceInfo> {
         self.imp().wifi_adapters.borrow().clone()
     }
@@ -640,14 +676,11 @@ impl WlcontrolManager {
     }
 
     pub fn request_wifi_scan(&self) {
-        self.send_command(BackendCommand::WifiScan {
-            device_path: self.active_device_path(),
-        });
+        self.send_command(BackendCommand::WifiScan);
     }
 
     pub fn request_wifi_connect(&self, path: &str) {
         self.send_command(BackendCommand::WifiConnect {
-            device_path: self.active_device_path(),
             path: path.to_string(),
         });
     }
@@ -665,9 +698,7 @@ impl WlcontrolManager {
             }
         }
         self.emit_by_name::<()>("wifi-network-updated", &[]);
-        self.send_command(BackendCommand::WifiDisconnect {
-            device_path: self.active_device_path(),
-        });
+        self.send_command(BackendCommand::WifiDisconnect);
     }
 
     pub fn request_wifi_forget(&self, path: &str) {
@@ -878,720 +909,17 @@ impl WlcontrolManager {
     }
 }
 
-use super::bluetooth::backend::{BtAdapterEventStream, BtDeviceEventStream, BtDiscoveryStream, BtPairingRequest};
-use super::bluetooth::BluetoothBackend;
-use super::wifi::iwd_proxy::{AgentManagerProxy, DeviceProxy, StationProxy};
-use super::wifi::{IwdAgent, PassphraseRequest};
-use super::wifi_backend::{
-    find_all_iwd_devices, get_known_networks, get_wifi_networks, has_station_interface, WifiBackend,
-};
-
 async fn run_backend(
     cmd_rx: Receiver<BackendCommand>,
     evt_tx: Sender<BackendEvent>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use tokio::sync::oneshot;
-
-    tracing::info!("Starting backend...");
-
-    // Connect to system D-Bus
-    let conn = zbus::Connection::system().await?;
-    tracing::info!("Connected to system D-Bus");
-
-    // Create channel for passphrase requests from agent
-    let (passphrase_tx, passphrase_rx) = async_channel::unbounded::<PassphraseRequest>();
-
-    // Create and register iwd agent
-    let agent = IwdAgent::new(passphrase_tx);
-    let agent_path = "/dev/neoden/wlcontrol/Agent";
-    conn.object_server().at(agent_path, agent).await?;
-    tracing::info!("Registered iwd agent at {}", agent_path);
-
-    // Discover all WiFi devices
-    let wifi_device_infos = match find_all_iwd_devices(&conn).await {
-        Ok(infos) => infos,
-        Err(e) => {
-            tracing::warn!("Failed to enumerate iwd devices: {}", e);
-            Vec::new()
-        }
-    };
-    // Pick initial adapter: prefer one that's already connected, fall back to first
-    let initial_device = {
-        let mut connected_device = None;
-        for info in &wifi_device_infos {
-            let path: zbus::zvariant::OwnedObjectPath = info.device_path.as_str().try_into().unwrap();
-            if has_station_interface(&conn, &path).await {
-                if let Ok(station) = StationProxy::builder(&conn).path(path).unwrap().build().await {
-                    if station.connected_network().await.is_ok() {
-                        connected_device = Some(info);
-                        break;
-                    }
-                }
-            }
-        }
-        connected_device.or(wifi_device_infos.first())
-    };
-
-    let _ = evt_tx
-        .send(BackendEvent::WifiDevices {
-            devices: wifi_device_infos.clone(),
-            active_path: initial_device.map(|d| d.device_path.clone()),
-        })
-        .await;
-
-    let mut wifi: Option<WifiBackend> = initial_device.map(|info| {
-        tracing::info!("Selected initial WiFi adapter: {} ({})", info.device_name, info.device_path);
-        let path: zbus::zvariant::OwnedObjectPath = info.device_path.as_str().try_into().unwrap();
-        WifiBackend::new(conn.clone(), evt_tx.clone(), path)
-    });
-
-    // Register agent with iwd (agent is global, handles all devices)
-    if !wifi_device_infos.is_empty() {
-        match AgentManagerProxy::new(&conn).await {
-            Ok(agent_manager) => {
-                match agent_manager
-                    .register_agent(agent_path.try_into().unwrap())
-                    .await
-                {
-                    Ok(()) => tracing::info!("Registered agent with iwd"),
-                    Err(e) => {
-                        tracing::warn!("Failed to register agent with iwd: {}", e);
-                        let _ = evt_tx
-                            .send(BackendEvent::Error(
-                                "Cannot register password agent. Connecting to secured networks may fail.".into(),
-                            ))
-                            .await;
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Failed to connect to iwd AgentManager: {}", e);
-                let _ = evt_tx
-                    .send(BackendEvent::Error(
-                        "Cannot connect to iwd AgentManager. Connecting to secured networks may fail.".into(),
-                    ))
-                    .await;
-            }
-        }
-    }
-
-    // Helper to create DeviceProxy safely
-    async fn create_device_proxy(
-        conn: &zbus::Connection,
-        path: &zbus::zvariant::OwnedObjectPath,
-    ) -> Option<DeviceProxy<'static>> {
-        DeviceProxy::builder(conn)
-            .path(path.clone())
-            .ok()?
-            .build()
-            .await
-            .ok()
-    }
-
-    // Helper to create StationProxy safely
-    async fn create_station_proxy(
-        conn: &zbus::Connection,
-        path: &zbus::zvariant::OwnedObjectPath,
-    ) -> Option<StationProxy<'static>> {
-        if !has_station_interface(conn, path).await {
-            return None;
-        }
-        StationProxy::builder(conn)
-            .path(path.clone())
-            .ok()?
-            .build()
-            .await
-            .ok()
-    }
-
-    // Helper to send initial WiFi state for a device
-    async fn send_wifi_initial_state(
-        conn: &zbus::Connection,
-        device_path: &zbus::zvariant::OwnedObjectPath,
-        evt_tx: &Sender<BackendEvent>,
-    ) {
-        if let Some(device) = create_device_proxy(conn, device_path).await {
-            if let Ok(powered) = device.powered().await {
-                let _ = evt_tx.send(BackendEvent::WifiPowered(powered)).await;
-
-                if powered {
-                    if let Some(station) = create_station_proxy(conn, device_path).await {
-                        if let Ok(scanning) = station.scanning().await {
-                            let _ = evt_tx.send(BackendEvent::WifiScanning(scanning)).await;
-                        }
-                        if let Ok(networks) = get_wifi_networks(conn, &station).await {
-                            let _ = evt_tx.send(BackendEvent::WifiNetworks(networks)).await;
-                        }
-                    }
-                }
-                if let Ok(known) = get_known_networks(conn).await {
-                    let _ = evt_tx.send(BackendEvent::WifiKnownNetworks(known)).await;
-                }
-            }
-        }
-    }
-
-    // Send initial state for active WiFi device
-    if let Some(ref w) = wifi {
-        if let Some(path) = w.device_path() {
-            send_wifi_initial_state(&conn, path, &evt_tx).await;
-        }
-    }
-
-    // Initialize Bluetooth backend
-    let (bt, bt_pairing_rx): (Option<BluetoothBackend>, Option<async_channel::Receiver<BtPairingRequest>>) =
-        match BluetoothBackend::new(evt_tx.clone()).await {
-            Ok((bt, rx)) => (Some(bt), Some(rx)),
-            Err(e) => {
-                tracing::warn!("Failed to initialize Bluetooth backend: {}. BT disabled.", e);
-                let _ = evt_tx
-                    .send(BackendEvent::Error(format!("Bluetooth: {}", e)))
-                    .await;
-                (None, None)
-            }
-        };
-
-    // BT streams stored externally to avoid borrow conflicts in tokio::select!
-    let mut bt_discovery_stream: Option<BtDiscoveryStream> = None;
-    let mut bt_adapter_events: Option<BtAdapterEventStream> = None;
-    let mut bt_device_events: futures::stream::SelectAll<BtDeviceEventStream> =
-        futures::stream::SelectAll::new();
-    let mut bt_tracked_devices: std::collections::HashSet<bluer::Address> =
-        std::collections::HashSet::new();
-
-    // Send initial BT state and start always-on adapter event stream
-    if let Some(ref bt_backend) = bt {
-        bt_backend
-            .send_initial_state(&mut bt_device_events, &mut bt_tracked_devices)
-            .await;
-        bt_adapter_events = bt_backend.adapter_events().await;
-    }
-
-    // Store pending passphrase response sender
-    let mut pending_passphrase_response: Option<oneshot::Sender<Option<String>>> = None;
-
-    // Store pending BT pairing response senders
-    let mut pending_pairing_response: Option<
-        oneshot::Sender<Result<(), bluer::agent::ReqError>>,
-    > = None;
-    let mut pending_pin_response: Option<
-        oneshot::Sender<Result<String, bluer::agent::ReqError>>,
-    > = None;
-    let mut pending_passkey_response: Option<
-        oneshot::Sender<Result<u32, bluer::agent::ReqError>>,
-    > = None;
-
-    // Set up property change streams for Device
-    let mut device_powered_stream = match wifi.as_ref().and_then(|w| w.device_path()) {
-        Some(path) => {
-            if let Some(device) = create_device_proxy(&conn, path).await {
-                Some(device.receive_powered_changed().await)
-            } else {
-                None
-            }
-        }
-        None => None,
-    };
-
-    // Set up property change streams for Station (only if powered)
-    let mut station_scanning_stream: Option<zbus::PropertyStream<'_, bool>> = None;
-    let mut station_state_stream: Option<zbus::PropertyStream<'_, String>> = None;
-
-    // Helper to wait for Station interface with retry
-    async fn wait_for_station_proxy(
-        conn: &zbus::Connection,
-        device_path: &zbus::zvariant::OwnedObjectPath,
-        max_attempts: u32,
-    ) -> Option<StationProxy<'static>> {
-        for attempt in 0..max_attempts {
-            if let Some(station) = create_station_proxy(conn, device_path).await {
-                tracing::debug!("Station interface available after {} attempts", attempt + 1);
-                return Some(station);
-            }
-            if attempt + 1 < max_attempts {
-                // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms
-                let delay = 50 * (1 << attempt.min(4));
-                tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
-            }
-        }
-        tracing::warn!(
-            "Station interface not available after {} attempts",
-            max_attempts
-        );
-        None
-    }
-
-    // Helper to refresh station streams
-    async fn setup_station_streams(
-        conn: &zbus::Connection,
-        device_path: &zbus::zvariant::OwnedObjectPath,
-    ) -> (
-        Option<zbus::PropertyStream<'static, bool>>,
-        Option<zbus::PropertyStream<'static, String>>,
-    ) {
-        let Some(station) = create_station_proxy(conn, device_path).await else {
-            return (None, None);
-        };
-        let scanning = station.receive_scanning_changed().await;
-        let state = station.receive_state_changed().await;
-        (Some(scanning), Some(state))
-    }
-
-    // Helper to setup station streams with retry
-    async fn setup_station_streams_with_retry(
-        conn: &zbus::Connection,
-        device_path: &zbus::zvariant::OwnedObjectPath,
-    ) -> (
-        Option<zbus::PropertyStream<'static, bool>>,
-        Option<zbus::PropertyStream<'static, String>>,
-    ) {
-        let Some(station) = wait_for_station_proxy(conn, device_path, 10).await else {
-            return (None, None);
-        };
-        let scanning = station.receive_scanning_changed().await;
-        let state = station.receive_state_changed().await;
-        (Some(scanning), Some(state))
-    }
-
-    // Initialize station streams if already powered
-    if let Some(ref w) = wifi {
-        if let Some(path) = w.device_path() {
-            if has_station_interface(&conn, path).await {
-                let (scanning, state) = setup_station_streams(&conn, path).await;
-                station_scanning_stream = scanning;
-                station_state_stream = state;
-            }
-        }
-    }
-
-    // Subscribe to iwd ObjectManager for hot-plug (adapter add/remove)
-    let iwd_obj_manager = zbus::fdo::ObjectManagerProxy::builder(&conn)
-        .destination("net.connman.iwd")
-        .ok()
-        .and_then(|b| b.path("/").ok());
-    let mut iwd_interfaces_added = None;
-    let mut iwd_interfaces_removed = None;
-    if let Some(builder) = iwd_obj_manager {
-        if let Ok(proxy) = builder.build().await {
-            iwd_interfaces_added = proxy.receive_interfaces_added().await.ok();
-            iwd_interfaces_removed = proxy.receive_interfaces_removed().await.ok();
-        }
-    }
-
-    // Mutable copy of device infos for hot-plug updates
-    let mut wifi_device_infos = wifi_device_infos;
-
-    let mut bt_scan_deadline: Option<tokio::time::Instant> = None;
+    let (mut state, mut streams) = super::event_loop::init(cmd_rx, evt_tx).await?;
 
     loop {
-        tokio::select! {
-            // Auto-stop BT discovery after timeout
-            _ = async {
-                match bt_scan_deadline {
-                    Some(deadline) => tokio::time::sleep_until(deadline).await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                tracing::info!("Bluetooth discovery timeout (30s), stopping scan");
-                if bt_discovery_stream.take().is_some() {
-                    if let Some(ref bt_backend) = bt {
-                        bt_backend.notify_scan_stopped().await;
-                    }
-                }
-                bt_scan_deadline = None;
-            }
-            // Handle Device.powered changes
-            Some(change) = async {
-                match device_powered_stream.as_mut() {
-                    Some(s) => s.next().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                if let Ok(powered) = change.get().await {
-                    tracing::info!("Device powered changed: {}", powered);
-                    let _ = evt_tx.send(BackendEvent::WifiPowered(powered)).await;
-
-                    if let Some(ref w) = wifi {
-                        if let Some(path) = w.device_path() {
-                            if powered {
-                                let (scanning, state) = setup_station_streams_with_retry(&conn, path).await;
-                                station_scanning_stream = scanning;
-                                station_state_stream = state;
-                                w.send_networks().await;
-                                w.send_known_networks().await;
-                            } else {
-                                station_scanning_stream = None;
-                                station_state_stream = None;
-                                let _ = evt_tx.send(BackendEvent::WifiNetworks(vec![])).await;
-                            }
-                        }
-                    }
-                }
-            }
-            // Handle Station.scanning changes
-            Some(change) = async {
-                match station_scanning_stream.as_mut() {
-                    Some(s) => s.next().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                if let Ok(scanning) = change.get().await {
-                    tracing::debug!("Station scanning changed: {}", scanning);
-                    let _ = evt_tx.send(BackendEvent::WifiScanning(scanning)).await;
-                    if !scanning {
-                        if let Some(ref w) = wifi {
-                            w.send_networks().await;
-                            w.send_known_networks().await;
-                        }
-                    }
-                }
-            }
-            // Handle Station.state changes (connected/disconnected/etc)
-            Some(change) = async {
-                match station_state_stream.as_mut() {
-                    Some(s) => s.next().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                if let Ok(state) = change.get().await {
-                    tracing::info!("Station state changed: {}", state);
-                    if let Some(ref w) = wifi {
-                        w.send_connected_status().await;
-                    }
-                }
-            }
-            // Handle passphrase requests from iwd agent
-            Ok(request) = passphrase_rx.recv() => {
-                tracing::info!("Passphrase request: {} ({})", request.network_name, request.network_path);
-                pending_passphrase_response = Some(request.response_tx);
-                let _ = evt_tx.send(BackendEvent::PassphraseRequest {
-                    network_path: request.network_path,
-                    network_name: request.network_name,
-                }).await;
-            }
-            // Handle BT discovery stream events
-            Some(adapter_event) = async {
-                match bt_discovery_stream.as_mut() {
-                    Some(stream) => stream.next().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                if let Some(ref bt_backend) = bt {
-                    bt_backend.handle_adapter_event(
-                        adapter_event,
-                        &mut bt_device_events,
-                        &mut bt_tracked_devices,
-                    ).await;
-                }
-            }
-            // Handle always-on adapter events (DeviceAdded/DeviceRemoved even when not scanning)
-            Some(adapter_event) = async {
-                match bt_adapter_events.as_mut() {
-                    Some(stream) => stream.next().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                if let Some(ref bt_backend) = bt {
-                    bt_backend.handle_adapter_event(
-                        adapter_event,
-                        &mut bt_device_events,
-                        &mut bt_tracked_devices,
-                    ).await;
-                }
-            }
-            // Handle per-device BT property change events
-            Some((addr, event)) = bt_device_events.next() => {
-                if let Some(ref bt_backend) = bt {
-                    let bluer::DeviceEvent::PropertyChanged(prop) = event;
-                    bt_backend.handle_device_property_change(addr, prop).await;
-                }
-            }
-            // Handle BT pairing agent requests
-            Ok(request) = async {
-                match bt_pairing_rx.as_ref() {
-                    Some(rx) => rx.recv().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                let (kind, address, code) = match request {
-                    BtPairingRequest::ConfirmPasskey { address, passkey, response_tx } => {
-                        pending_pairing_response = Some(response_tx);
-                        ("confirm-passkey", address, format!("{:06}", passkey))
-                    }
-                    BtPairingRequest::RequestPinCode { address, response_tx } => {
-                        pending_pin_response = Some(response_tx);
-                        ("request-pin", address, String::new())
-                    }
-                    BtPairingRequest::RequestPasskey { address, response_tx } => {
-                        pending_passkey_response = Some(response_tx);
-                        ("request-passkey", address, String::new())
-                    }
-                    BtPairingRequest::DisplayPasskey { address, passkey } => {
-                        ("display-passkey", address, format!("{:06}", passkey))
-                    }
-                    BtPairingRequest::DisplayPinCode { address, pin_code } => {
-                        ("display-pin", address, pin_code)
-                    }
-                    BtPairingRequest::RequestAuthorization { address, response_tx } => {
-                        pending_pairing_response = Some(response_tx);
-                        ("authorize", address, String::new())
-                    }
-                };
-                tracing::info!("BT pairing {} for {} ({})", kind, address, code);
-                let _ = evt_tx.send(BackendEvent::BtPairing {
-                    kind: kind.to_string(),
-                    address: address.to_string(),
-                    code,
-                }).await;
-            }
-            // Handle iwd device hot-plug: InterfacesAdded
-            Some(signal) = async {
-                match iwd_interfaces_added.as_mut() {
-                    Some(s) => s.next().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                if let Ok(args) = signal.args() {
-                    let ifaces = args.interfaces_and_properties();
-                    if ifaces.contains_key("net.connman.iwd.Device") {
-                        tracing::info!("iwd device added: {}", args.object_path());
-                        if let Ok(infos) = find_all_iwd_devices(&conn).await {
-                            wifi_device_infos = infos;
-                            let active = wifi.as_ref().and_then(|w| w.device_path()).map(|p| p.to_string());
-                            let _ = evt_tx.send(BackendEvent::WifiDevices {
-                                devices: wifi_device_infos.clone(),
-                                active_path: active,
-                            }).await;
-                        }
-                    }
-                }
-            }
-            // Handle iwd device hot-plug: InterfacesRemoved
-            Some(signal) = async {
-                match iwd_interfaces_removed.as_mut() {
-                    Some(s) => s.next().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                if let Ok(args) = signal.args() {
-                    let ifaces = args.interfaces();
-                    if ifaces.iter().any(|i| *i == "net.connman.iwd.Device") {
-                        let removed_path = args.object_path().to_string();
-                        tracing::info!("iwd device removed: {}", removed_path);
-
-                        // Check if the removed device is the active one
-                        let active_removed = wifi.as_ref()
-                            .and_then(|w| w.device_path())
-                            .map(|p| p.as_str() == removed_path)
-                            .unwrap_or(false);
-
-                        if let Ok(infos) = find_all_iwd_devices(&conn).await {
-                            wifi_device_infos = infos;
-                        }
-
-                        if active_removed {
-                            if let Some(info) = wifi_device_infos.first() {
-                                let path: zbus::zvariant::OwnedObjectPath = info.device_path.as_str().try_into().unwrap();
-                                wifi = Some(WifiBackend::new(conn.clone(), evt_tx.clone(), path.clone()));
-                                device_powered_stream = if let Some(device) = create_device_proxy(&conn, &path).await {
-                                    Some(device.receive_powered_changed().await)
-                                } else {
-                                    None
-                                };
-                                let (scanning, state) = setup_station_streams(&conn, &path).await;
-                                station_scanning_stream = scanning;
-                                station_state_stream = state;
-                                send_wifi_initial_state(&conn, &path, &evt_tx).await;
-                            } else {
-                                wifi = None;
-                                device_powered_stream = None;
-                                station_scanning_stream = None;
-                                station_state_stream = None;
-                                let _ = evt_tx.send(BackendEvent::WifiPowered(false)).await;
-                                let _ = evt_tx.send(BackendEvent::WifiNetworks(vec![])).await;
-                            }
-                        }
-
-                        let active = wifi.as_ref().and_then(|w| w.device_path()).map(|p| p.to_string());
-                        let _ = evt_tx.send(BackendEvent::WifiDevices {
-                            devices: wifi_device_infos.clone(),
-                            active_path: active,
-                        }).await;
-                    }
-                }
-            }
-            // Handle commands from UI
-            result = cmd_rx.recv() => {
-                let cmd = match result {
-                    Ok(cmd) => cmd,
-                    Err(_) => break, // Channel closed
-                };
-                tracing::debug!("Received command: {:?}", cmd);
-                match cmd {
-                    BackendCommand::Shutdown => {
-                        tracing::info!("Backend shutdown requested");
-                        if let Some(ref w) = wifi {
-                            w.shutdown();
-                        }
-                        drop(bt_discovery_stream);
-                        break;
-                    }
-                    BackendCommand::PassphraseResponse { passphrase } => {
-                        if let Some(tx) = pending_passphrase_response.take() {
-                            let _ = tx.send(passphrase);
-                        }
-                    }
-                    BackendCommand::WifiScan { .. } => {
-                        if let Some(ref w) = wifi { w.scan().await; }
-                    }
-                    BackendCommand::WifiConnect { path, .. } => {
-                        if let Some(ref w) = wifi { w.connect(&path).await; }
-                    }
-                    BackendCommand::WifiDisconnect { .. } => {
-                        if let Some(ref w) = wifi { w.disconnect().await; }
-                    }
-                    BackendCommand::WifiForget { path } => {
-                        if let Some(ref w) = wifi { w.forget(&path).await; }
-                    }
-                    BackendCommand::WifiForgetKnown { path } => {
-                        if let Some(ref w) = wifi { w.forget_known(&path).await; }
-                    }
-                    BackendCommand::WifiSetPowered { powered, .. } => {
-                        if let Some(ref w) = wifi { w.set_powered(powered).await; }
-                    }
-                    BackendCommand::WifiSwitchAdapter { device_path } => {
-                        tracing::info!("Switching WiFi adapter to {}", device_path);
-                        // Shutdown old backend
-                        if let Some(ref w) = wifi {
-                            w.shutdown();
-                        }
-                        // Create new backend for the selected device
-                        let path: zbus::zvariant::OwnedObjectPath = device_path.as_str().try_into().unwrap();
-                        wifi = Some(WifiBackend::new(conn.clone(), evt_tx.clone(), path.clone()));
-                        // Re-setup Device property streams
-                        device_powered_stream = if let Some(device) = create_device_proxy(&conn, &path).await {
-                            Some(device.receive_powered_changed().await)
-                        } else {
-                            None
-                        };
-                        // Re-setup Station streams
-                        if has_station_interface(&conn, &path).await {
-                            let (scanning, state) = setup_station_streams(&conn, &path).await;
-                            station_scanning_stream = scanning;
-                            station_state_stream = state;
-                        } else {
-                            station_scanning_stream = None;
-                            station_state_stream = None;
-                        }
-                        // Send initial state for the new device
-                        send_wifi_initial_state(&conn, &path, &evt_tx).await;
-                    }
-                    BackendCommand::BtScan => {
-                        if bt_discovery_stream.is_none() {
-                            if let Some(ref bt_backend) = bt {
-                                bt_discovery_stream = bt_backend.start_scan().await;
-                                if bt_discovery_stream.is_some() {
-                                    bt_scan_deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(30));
-                                }
-                            }
-                        }
-                    }
-                    BackendCommand::BtStopScan => {
-                        if bt_discovery_stream.take().is_some() {
-                            bt_scan_deadline = None;
-                            if let Some(ref bt_backend) = bt {
-                                bt_backend.notify_scan_stopped().await;
-                            }
-                        }
-                    }
-                    BackendCommand::BtConnect { path } => {
-                        if let Some(ref bt_backend) = bt {
-                            bt_backend.connect(&path).await;
-                        }
-                    }
-                    BackendCommand::BtDisconnect { path } => {
-                        if let Some(ref bt_backend) = bt {
-                            bt_backend.disconnect(&path).await;
-                        }
-                    }
-                    BackendCommand::BtPair { path } => {
-                        if let Some(ref bt_backend) = bt {
-                            bt_backend.pair(&path);
-                        }
-                    }
-                    BackendCommand::BtRemove { path } => {
-                        if let Some(ref bt_backend) = bt {
-                            bt_backend.remove(&path).await;
-                        }
-                    }
-                    BackendCommand::BtSetAlias { path, alias } => {
-                        if let Some(ref bt_backend) = bt {
-                            bt_backend.set_alias(&path, &alias).await;
-                        }
-                    }
-                    BackendCommand::BtSetTrusted { path, trusted } => {
-                        if let Some(ref bt_backend) = bt {
-                            bt_backend.set_trusted_flag(&path, trusted).await;
-                        }
-                    }
-                    BackendCommand::BtSetPowered(powered) => {
-                        if !powered {
-                            if bt_discovery_stream.take().is_some() {
-                                if let Some(ref bt_backend) = bt {
-                                    bt_backend.notify_scan_stopped().await;
-                                }
-                            }
-                            bt_scan_deadline = None;
-                            bt_tracked_devices.clear();
-                            bt_device_events = futures::stream::SelectAll::new();
-                            bt_adapter_events = None;
-                        }
-                        if let Some(ref bt_backend) = bt {
-                            bt_backend.set_powered(powered).await;
-                            if powered {
-                                bt_backend.send_initial_state(
-                                    &mut bt_device_events,
-                                    &mut bt_tracked_devices,
-                                ).await;
-                                bt_adapter_events = bt_backend.adapter_events().await;
-                            }
-                        }
-                    }
-                    BackendCommand::BtSetDiscoverable(discoverable) => {
-                        if let Some(ref bt_backend) = bt {
-                            bt_backend.set_discoverable(discoverable).await;
-                        }
-                    }
-                    BackendCommand::BtPairingResponse { accept } => {
-                        if let Some(tx) = pending_pairing_response.take() {
-                            let result = if accept {
-                                Ok(())
-                            } else {
-                                Err(bluer::agent::ReqError::Rejected)
-                            };
-                            let _ = tx.send(result);
-                        }
-                    }
-                    BackendCommand::BtPairingPinResponse { pin } => {
-                        if let Some(tx) = pending_pin_response.take() {
-                            let result = match pin {
-                                Some(p) => Ok(p),
-                                None => Err(bluer::agent::ReqError::Rejected),
-                            };
-                            let _ = tx.send(result);
-                        }
-                    }
-                    BackendCommand::BtPairingPasskeyResponse { passkey } => {
-                        if let Some(tx) = pending_passkey_response.take() {
-                            let result = match passkey {
-                                Some(k) => Ok(k),
-                                None => Err(bluer::agent::ReqError::Rejected),
-                            };
-                            let _ = tx.send(result);
-                        }
-                    }
-                }
-            }
+        let event = streams.next_event().await;
+        match state.handle_event(event, &mut streams).await {
+            super::event_loop::LoopAction::Continue => {}
+            super::event_loop::LoopAction::Break => break,
         }
     }
 

@@ -1,6 +1,6 @@
 use adw::prelude::*;
 use adw::subclass::prelude::*;
-use gtk::{gdk, gio, glib};
+use gtk::{gio, glib};
 use std::cell::OnceCell;
 
 use crate::backend::wifi::{WifiNetwork, WifiNetworkState};
@@ -99,10 +99,8 @@ impl WifiNetworkRow {
             #[weak]
             network,
             move |_, _| {
-                if let Some(display) = row.display().into() {
-                    let clipboard: gdk::Clipboard = display.clipboard();
-                    clipboard.set_text(&network.name());
-                }
+                let clipboard = row.display().clipboard();
+                clipboard.set_text(&network.name());
             }
         ));
         group.add_action(&copy_name);

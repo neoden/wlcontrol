@@ -116,7 +116,7 @@ impl BluetoothBackend {
             Err(e) => {
                 tracing::warn!("No Bluetooth adapter found: {}. BT features disabled.", e);
                 let _ = evt_tx
-                    .send(BackendEvent::Error(format!(
+                    .send(BackendEvent::BtError(format!(
                         "No Bluetooth adapter: {}",
                         e
                     )))
@@ -332,6 +332,25 @@ impl BluetoothBackend {
         }
     }
 
+    /// Rebuild device event streams from current tracked_devices set.
+    /// Drops stale streams for devices that were removed during scan.
+    pub async fn rebuild_device_streams(
+        &self,
+        device_events: &mut SelectAll<BtDeviceEventStream>,
+        tracked_devices: &mut HashSet<Address>,
+    ) {
+        let Some(ref adapter) = self.adapter else {
+            return;
+        };
+        let addrs: Vec<Address> = tracked_devices.drain().collect();
+        *device_events = SelectAll::new();
+        for addr in addrs {
+            if let Ok(device) = adapter.device(addr) {
+                Self::start_tracking_device(addr, &device, device_events, tracked_devices).await;
+            }
+        }
+    }
+
     /// Handle AdapterEvent from discovery stream
     pub async fn handle_adapter_event(
         &self,
@@ -432,7 +451,7 @@ impl BluetoothBackend {
                 tracing::error!("Failed to start BT discovery: {}", e);
                 let _ = self
                     .evt_tx
-                    .send(BackendEvent::Error(format_bt_error(&e)))
+                    .send(BackendEvent::BtError(format_bt_error(&e)))
                     .await;
                 None
             }
@@ -458,7 +477,7 @@ impl BluetoothBackend {
             None => {
                 let _ = self
                     .evt_tx
-                    .send(BackendEvent::Error("Invalid Bluetooth address".into()))
+                    .send(BackendEvent::BtError("Invalid Bluetooth address".into()))
                     .await;
                 return;
             }
@@ -471,7 +490,7 @@ impl BluetoothBackend {
                     tracing::error!("BT connect to {} failed: {}", addr, e);
                     let _ = self
                         .evt_tx
-                        .send(BackendEvent::Error(format_bt_error(&e)))
+                        .send(BackendEvent::BtError(format_bt_error(&e)))
                         .await;
                 } else {
                     tracing::info!("Connected to BT device {}", addr);
@@ -481,7 +500,7 @@ impl BluetoothBackend {
                 tracing::error!("Cannot get device {}: {}", addr, e);
                 let _ = self
                     .evt_tx
-                    .send(BackendEvent::Error(format!("Device not found: {}", e)))
+                    .send(BackendEvent::BtError(format!("Device not found: {}", e)))
                     .await;
             }
         }
@@ -501,7 +520,7 @@ impl BluetoothBackend {
                 tracing::error!("BT disconnect from {} failed: {}", addr, e);
                 let _ = self
                     .evt_tx
-                    .send(BackendEvent::Error(format_bt_error(&e)))
+                    .send(BackendEvent::BtError(format_bt_error(&e)))
                     .await;
             }
         }
@@ -525,7 +544,7 @@ impl BluetoothBackend {
                 let evt_tx = self.evt_tx.clone();
                 tokio::spawn(async move {
                     let _ = evt_tx
-                        .send(BackendEvent::Error(format!("Device not found: {}", e)))
+                        .send(BackendEvent::BtError(format!("Device not found: {}", e)))
                         .await;
                 });
                 return;
@@ -539,7 +558,7 @@ impl BluetoothBackend {
             if let Err(e) = device.pair().await {
                 tracing::error!("BT pair with {} failed: {}", addr, e);
                 let _ = evt_tx
-                    .send(BackendEvent::Error(format_bt_error(&e)))
+                    .send(BackendEvent::BtError(format_bt_error(&e)))
                     .await;
             } else {
                 tracing::info!("Paired with BT device {}", addr);
@@ -579,7 +598,7 @@ impl BluetoothBackend {
                 tracing::error!("BT remove {} failed: {}", addr, e);
                 let _ = self
                     .evt_tx
-                    .send(BackendEvent::Error(format_bt_error(&e)))
+                    .send(BackendEvent::BtError(format_bt_error(&e)))
                     .await;
             }
         }
@@ -599,7 +618,7 @@ impl BluetoothBackend {
                 tracing::error!("BT set alias for {} failed: {}", addr, e);
                 let _ = self
                     .evt_tx
-                    .send(BackendEvent::Error(format_bt_error(&e)))
+                    .send(BackendEvent::BtError(format_bt_error(&e)))
                     .await;
             }
         }
@@ -619,7 +638,7 @@ impl BluetoothBackend {
                 tracing::error!("BT set trusted {} for {} failed: {}", trusted, addr, e);
                 let _ = self
                     .evt_tx
-                    .send(BackendEvent::Error(format_bt_error(&e)))
+                    .send(BackendEvent::BtError(format_bt_error(&e)))
                     .await;
             }
         }
@@ -634,8 +653,12 @@ impl BluetoothBackend {
             tracing::error!("BT set powered {} failed: {}", powered, e);
             let _ = self
                 .evt_tx
-                .send(BackendEvent::Error(format_bt_error(&e)))
+                .send(BackendEvent::BtError(format_bt_error(&e)))
                 .await;
+            // Send actual state back so UI can roll back the optimistic update
+            if let Ok(actual) = adapter.is_powered().await {
+                let _ = self.evt_tx.send(BackendEvent::BtPowered(actual)).await;
+            }
             return;
         }
         let _ = self.evt_tx.send(BackendEvent::BtPowered(powered)).await;
@@ -650,8 +673,15 @@ impl BluetoothBackend {
             tracing::error!("BT set discoverable {} failed: {}", discoverable, e);
             let _ = self
                 .evt_tx
-                .send(BackendEvent::Error(format_bt_error(&e)))
+                .send(BackendEvent::BtError(format_bt_error(&e)))
                 .await;
+            // Send actual state back so UI can roll back the optimistic update
+            if let Ok(actual) = adapter.is_discoverable().await {
+                let _ = self
+                    .evt_tx
+                    .send(BackendEvent::BtDiscoverable(actual))
+                    .await;
+            }
             return;
         }
         let _ = self
