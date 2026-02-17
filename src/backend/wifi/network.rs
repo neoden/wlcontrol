@@ -263,3 +263,86 @@ impl WifiNetwork {
         self.signal_strength() / 100
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_network() -> WifiNetwork {
+        WifiNetwork::new("/net/1", "TestWiFi", "psk", -4500, false, false)
+    }
+
+    // --- Base states (no local operation flags) ---
+
+    #[test]
+    fn state_available() {
+        let n = make_network();
+        assert_eq!(n.state(), WifiNetworkState::Available);
+    }
+
+    #[test]
+    fn state_saved() {
+        let n = make_network();
+        n.set_known(true);
+        assert_eq!(n.state(), WifiNetworkState::Saved);
+    }
+
+    #[test]
+    fn state_saved_offline() {
+        let n = WifiNetwork::new_saved_offline("/net/1", "TestWiFi", "psk");
+        assert_eq!(n.state(), WifiNetworkState::SavedOffline);
+    }
+
+    #[test]
+    fn state_connected() {
+        let n = make_network();
+        n.set_connected(true);
+        assert_eq!(n.state(), WifiNetworkState::Connected);
+    }
+
+    // --- Local operation flags override iwd state ---
+
+    #[test]
+    fn connecting_overrides_saved() {
+        let n = make_network();
+        n.set_known(true);
+        n.set_connecting(true);
+        assert_eq!(n.state(), WifiNetworkState::Connecting);
+    }
+
+    #[test]
+    fn disconnecting_overrides_connected() {
+        let n = make_network();
+        n.set_connected(true);
+        n.set_disconnecting(true);
+        assert_eq!(n.state(), WifiNetworkState::Disconnecting);
+    }
+
+    #[test]
+    fn forgetting_overrides_everything() {
+        let n = make_network();
+        n.set_known(true);
+        n.set_connected(true);
+        n.set_disconnecting(true);
+        n.set_forgetting(true);
+        assert_eq!(n.state(), WifiNetworkState::Forgetting);
+    }
+
+    // --- Priority between local operations ---
+
+    #[test]
+    fn forgetting_beats_disconnecting() {
+        let n = make_network();
+        n.set_disconnecting(true);
+        n.set_forgetting(true);
+        assert_eq!(n.state(), WifiNetworkState::Forgetting);
+    }
+
+    #[test]
+    fn disconnecting_beats_connecting() {
+        let n = make_network();
+        n.set_connecting(true);
+        n.set_disconnecting(true);
+        assert_eq!(n.state(), WifiNetworkState::Disconnecting);
+    }
+}

@@ -360,3 +360,88 @@ impl BtDevice {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_device() -> BtDevice {
+        BtDevice::new("/dev/1", "AA:BB:CC:DD:EE:FF", "Test", "audio-headset", false, false)
+    }
+
+    // --- Base states (no local operation flags) ---
+
+    #[test]
+    fn state_discovered() {
+        let d = make_device();
+        assert_eq!(d.state(), BtDeviceState::Discovered);
+    }
+
+    #[test]
+    fn state_paired() {
+        let d = make_device();
+        d.set_paired(true);
+        assert_eq!(d.state(), BtDeviceState::Paired);
+    }
+
+    #[test]
+    fn state_connected() {
+        let d = make_device();
+        d.set_paired(true);
+        d.set_connected(true);
+        assert_eq!(d.state(), BtDeviceState::Connected);
+    }
+
+    // --- Local operation flags override BlueZ state ---
+
+    #[test]
+    fn connecting_unpaired_is_pairing() {
+        let d = make_device();
+        d.set_connecting(true);
+        assert_eq!(d.state(), BtDeviceState::Pairing);
+    }
+
+    #[test]
+    fn connecting_paired_is_connecting() {
+        let d = make_device();
+        d.set_paired(true);
+        d.set_connecting(true);
+        assert_eq!(d.state(), BtDeviceState::Connecting);
+    }
+
+    #[test]
+    fn disconnecting_overrides_connected() {
+        let d = make_device();
+        d.set_connected(true);
+        d.set_disconnecting(true);
+        assert_eq!(d.state(), BtDeviceState::Disconnecting);
+    }
+
+    #[test]
+    fn removing_overrides_everything() {
+        let d = make_device();
+        d.set_paired(true);
+        d.set_connected(true);
+        d.set_disconnecting(true);
+        d.set_removing(true);
+        assert_eq!(d.state(), BtDeviceState::Removing);
+    }
+
+    // --- Priority between local operations ---
+
+    #[test]
+    fn removing_beats_disconnecting() {
+        let d = make_device();
+        d.set_disconnecting(true);
+        d.set_removing(true);
+        assert_eq!(d.state(), BtDeviceState::Removing);
+    }
+
+    #[test]
+    fn disconnecting_beats_connecting() {
+        let d = make_device();
+        d.set_connecting(true);
+        d.set_disconnecting(true);
+        assert_eq!(d.state(), BtDeviceState::Disconnecting);
+    }
+}

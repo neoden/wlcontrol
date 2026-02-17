@@ -383,6 +383,26 @@ impl BluetoothBackend {
             }
             AdapterEvent::DeviceRemoved(addr) => {
                 tracked_devices.remove(&addr);
+                // BlueZ may fire DeviceRemoved for paired devices during
+                // discovery cleanup or BLE timeouts. Re-check with the adapter:
+                // if the device still exists and is paired, send an update
+                // instead of removing it from the UI.
+                if let Some(ref adapter) = self.adapter {
+                    if let Ok(device) = adapter.device(addr) {
+                        if device.is_paired().await.unwrap_or(false) {
+                            if let Some(data) = Self::read_device_data(&device).await {
+                                Self::start_tracking_device(
+                                    addr,
+                                    &device,
+                                    device_events,
+                                    tracked_devices,
+                                ).await;
+                                let _ = self.evt_tx.send(BackendEvent::BtDeviceChanged(data)).await;
+                                return;
+                            }
+                        }
+                    }
+                }
                 let _ = self
                     .evt_tx
                     .send(BackendEvent::BtDeviceRemoved(addr.to_string()))
