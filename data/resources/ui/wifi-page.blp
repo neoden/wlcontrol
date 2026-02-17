@@ -21,6 +21,11 @@ template $WifiPage: Adw.Bin {
           Adw.PreferencesGroup adapter_group {
             title: "Adapter";
 
+            header-suffix: Gtk.DropDown adapter_dropdown {
+              visible: false;
+              valign: center;
+            };
+
             Adw.SwitchRow adapter_switch {
               title: "WiFi";
               subtitle: "Enable wireless adapter";

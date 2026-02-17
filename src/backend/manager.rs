@@ -24,12 +24,14 @@ fn runtime() -> &'static Runtime {
 pub enum BackendCommand {
     /// Shutdown the backend gracefully
     Shutdown,
-    WifiScan,
-    WifiConnect { path: String },
-    WifiDisconnect,
+    WifiScan { device_path: String },
+    WifiConnect { device_path: String, path: String },
+    WifiDisconnect { device_path: String },
     WifiForget { path: String },           // network path, backend will get known_network from it
     WifiForgetKnown { path: String },       // KnownNetwork D-Bus path, for saved-offline networks
-    WifiSetPowered(bool),
+    WifiSetPowered { device_path: String, powered: bool },
+    /// Switch to a different WiFi adapter (recreate backend + streams)
+    WifiSwitchAdapter { device_path: String },
     /// Response to a passphrase request (None = cancelled)
     PassphraseResponse { passphrase: Option<String> },
     BtScan,
@@ -86,6 +88,11 @@ pub struct BtDeviceData {
 /// Events sent from backend to UI
 #[derive(Debug, Clone)]
 pub enum BackendEvent {
+    /// List of available WiFi adapters + which one is active
+    WifiDevices {
+        devices: Vec<super::wifi_backend::IwdDeviceInfo>,
+        active_path: Option<String>,
+    },
     WifiPowered(bool),
     WifiScanning(bool),
     WifiNetworks(Vec<WifiNetworkData>),
@@ -115,6 +122,7 @@ pub enum BackendEvent {
 
 mod imp {
     use super::{BackendCommand, BtDevice, KnownNetworkData, Sender, WifiNetwork};
+    use super::super::wifi_backend::IwdDeviceInfo;
     use adw::prelude::*;
     use adw::subclass::prelude::*;
     use gtk::{gio, glib};
@@ -135,6 +143,10 @@ mod imp {
         pub bt_discovering: RefCell<bool>,
         pub bt_discoverable: RefCell<bool>,
         pub cmd_tx: OnceLock<Sender<BackendCommand>>,
+        /// All discovered WiFi adapters
+        pub wifi_adapters: RefCell<Vec<IwdDeviceInfo>>,
+        /// Device path of the currently active WiFi adapter
+        pub active_wifi_device: RefCell<Option<String>>,
     }
 
     impl Default for WlcontrolManager {
@@ -151,6 +163,8 @@ mod imp {
                 bt_discovering: RefCell::new(false),
                 bt_discoverable: RefCell::new(false),
                 cmd_tx: OnceLock::new(),
+                wifi_adapters: RefCell::new(Vec::new()),
+                active_wifi_device: RefCell::new(None),
             }
         }
     }
@@ -179,6 +193,9 @@ mod imp {
                     glib::ParamSpecBoolean::builder("wifi-scanning")
                         .read_only()
                         .build(),
+                    glib::ParamSpecUInt::builder("wifi-adapter-count")
+                        .read_only()
+                        .build(),
                     glib::ParamSpecBoolean::builder("bt-powered").build(),
                     glib::ParamSpecBoolean::builder("bt-discovering")
                         .read_only()
@@ -201,6 +218,7 @@ mod imp {
                     glib::subclass::Signal::builder("error")
                         .param_types([String::static_type()])
                         .build(),
+                    glib::subclass::Signal::builder("wifi-adapters-changed").build(),
                     glib::subclass::Signal::builder("wifi-network-updated").build(),
                     glib::subclass::Signal::builder("bt-device-updated").build(),
                     glib::subclass::Signal::builder("bt-pairing")
@@ -218,6 +236,7 @@ mod imp {
             match pspec.name() {
                 "wifi-powered" => self.wifi_powered.borrow().to_value(),
                 "wifi-scanning" => self.wifi_scanning.borrow().to_value(),
+                "wifi-adapter-count" => (self.wifi_adapters.borrow().len() as u32).to_value(),
                 "bt-powered" => self.bt_powered.borrow().to_value(),
                 "bt-discovering" => self.bt_discovering.borrow().to_value(),
                 "bt-discoverable" => self.bt_discoverable.borrow().to_value(),
@@ -230,11 +249,11 @@ mod imp {
                 "wifi-powered" => {
                     let powered = value.get().unwrap();
                     self.wifi_powered.replace(powered);
-                    // Send command to backend
                     if let Some(tx) = self.cmd_tx.get() {
                         let tx = tx.clone();
+                        let device_path = self.active_wifi_device.borrow().clone().unwrap_or_default();
                         glib::spawn_future_local(async move {
-                            let _ = tx.send(BackendCommand::WifiSetPowered(powered)).await;
+                            let _ = tx.send(BackendCommand::WifiSetPowered { device_path, powered }).await;
                         });
                     }
                 }
@@ -303,6 +322,24 @@ impl WlcontrolManager {
 
     fn handle_event(&self, event: BackendEvent) {
         match event {
+            BackendEvent::WifiDevices { devices, active_path } => {
+                if let Some(ref path) = active_path {
+                    self.imp().active_wifi_device.replace(Some(path.clone()));
+                } else {
+                    let current = self.imp().active_wifi_device.borrow().clone();
+                    let still_present = current.as_ref()
+                        .map(|p| devices.iter().any(|d| d.device_path == *p))
+                        .unwrap_or(false);
+                    if !still_present {
+                        self.imp().active_wifi_device.replace(
+                            devices.first().map(|d| d.device_path.clone())
+                        );
+                    }
+                }
+                self.imp().wifi_adapters.replace(devices);
+                self.notify("wifi-adapter-count");
+                self.emit_by_name::<()>("wifi-adapters-changed", &[]);
+            }
             BackendEvent::WifiPowered(powered) => self.set_wifi_powered(powered),
             BackendEvent::WifiScanning(scanning) => self.set_wifi_scanning(scanning),
             BackendEvent::WifiNetworks(networks) => {
@@ -580,12 +617,37 @@ impl WlcontrolManager {
         }
     }
 
+    fn active_device_path(&self) -> String {
+        self.imp().active_wifi_device.borrow().clone().unwrap_or_default()
+    }
+
+    pub fn wifi_adapters(&self) -> Vec<super::wifi_backend::IwdDeviceInfo> {
+        self.imp().wifi_adapters.borrow().clone()
+    }
+
+    pub fn active_wifi_device_path(&self) -> Option<String> {
+        self.imp().active_wifi_device.borrow().clone()
+    }
+
+    pub fn set_active_wifi_adapter(&self, device_path: &str) {
+        self.imp().active_wifi_device.replace(Some(device_path.to_string()));
+        // Clear current models while backend loads new state
+        self.imp().wifi_networks.remove_all();
+        self.imp().saved_networks.remove_all();
+        self.send_command(BackendCommand::WifiSwitchAdapter {
+            device_path: device_path.to_string(),
+        });
+    }
+
     pub fn request_wifi_scan(&self) {
-        self.send_command(BackendCommand::WifiScan);
+        self.send_command(BackendCommand::WifiScan {
+            device_path: self.active_device_path(),
+        });
     }
 
     pub fn request_wifi_connect(&self, path: &str) {
         self.send_command(BackendCommand::WifiConnect {
+            device_path: self.active_device_path(),
             path: path.to_string(),
         });
     }
@@ -603,7 +665,9 @@ impl WlcontrolManager {
             }
         }
         self.emit_by_name::<()>("wifi-network-updated", &[]);
-        self.send_command(BackendCommand::WifiDisconnect);
+        self.send_command(BackendCommand::WifiDisconnect {
+            device_path: self.active_device_path(),
+        });
     }
 
     pub fn request_wifi_forget(&self, path: &str) {
@@ -818,7 +882,9 @@ use super::bluetooth::backend::{BtAdapterEventStream, BtDeviceEventStream, BtDis
 use super::bluetooth::BluetoothBackend;
 use super::wifi::iwd_proxy::{AgentManagerProxy, DeviceProxy, StationProxy};
 use super::wifi::{IwdAgent, PassphraseRequest};
-use super::wifi_backend::{get_known_networks, get_wifi_networks, has_station_interface, WifiBackend};
+use super::wifi_backend::{
+    find_all_iwd_devices, get_known_networks, get_wifi_networks, has_station_interface, WifiBackend,
+};
 
 async fn run_backend(
     cmd_rx: Receiver<BackendCommand>,
@@ -841,11 +907,46 @@ async fn run_backend(
     conn.object_server().at(agent_path, agent).await?;
     tracing::info!("Registered iwd agent at {}", agent_path);
 
-    // Create WiFi backend
-    let wifi = WifiBackend::new(conn.clone(), evt_tx.clone()).await;
+    // Discover all WiFi devices
+    let wifi_device_infos = match find_all_iwd_devices(&conn).await {
+        Ok(infos) => infos,
+        Err(e) => {
+            tracing::warn!("Failed to enumerate iwd devices: {}", e);
+            Vec::new()
+        }
+    };
+    // Pick initial adapter: prefer one that's already connected, fall back to first
+    let initial_device = {
+        let mut connected_device = None;
+        for info in &wifi_device_infos {
+            let path: zbus::zvariant::OwnedObjectPath = info.device_path.as_str().try_into().unwrap();
+            if has_station_interface(&conn, &path).await {
+                if let Ok(station) = StationProxy::builder(&conn).path(path).unwrap().build().await {
+                    if station.connected_network().await.is_ok() {
+                        connected_device = Some(info);
+                        break;
+                    }
+                }
+            }
+        }
+        connected_device.or(wifi_device_infos.first())
+    };
 
-    // Register agent with iwd
-    if wifi.device_path().is_some() {
+    let _ = evt_tx
+        .send(BackendEvent::WifiDevices {
+            devices: wifi_device_infos.clone(),
+            active_path: initial_device.map(|d| d.device_path.clone()),
+        })
+        .await;
+
+    let mut wifi: Option<WifiBackend> = initial_device.map(|info| {
+        tracing::info!("Selected initial WiFi adapter: {} ({})", info.device_name, info.device_path);
+        let path: zbus::zvariant::OwnedObjectPath = info.device_path.as_str().try_into().unwrap();
+        WifiBackend::new(conn.clone(), evt_tx.clone(), path)
+    });
+
+    // Register agent with iwd (agent is global, handles all devices)
+    if !wifi_device_infos.is_empty() {
         match AgentManagerProxy::new(&conn).await {
             Ok(agent_manager) => {
                 match agent_manager
@@ -903,28 +1004,37 @@ async fn run_backend(
             .ok()
     }
 
-    // Send initial state
-    if let Some(path) = wifi.device_path() {
-        if let Some(device) = create_device_proxy(&conn, path).await {
+    // Helper to send initial WiFi state for a device
+    async fn send_wifi_initial_state(
+        conn: &zbus::Connection,
+        device_path: &zbus::zvariant::OwnedObjectPath,
+        evt_tx: &Sender<BackendEvent>,
+    ) {
+        if let Some(device) = create_device_proxy(conn, device_path).await {
             if let Ok(powered) = device.powered().await {
                 let _ = evt_tx.send(BackendEvent::WifiPowered(powered)).await;
 
-                // If powered, get station info
                 if powered {
-                    if let Some(station) = create_station_proxy(&conn, path).await {
+                    if let Some(station) = create_station_proxy(conn, device_path).await {
                         if let Ok(scanning) = station.scanning().await {
                             let _ = evt_tx.send(BackendEvent::WifiScanning(scanning)).await;
                         }
-                        if let Ok(networks) = get_wifi_networks(&conn, &station).await {
+                        if let Ok(networks) = get_wifi_networks(conn, &station).await {
                             let _ = evt_tx.send(BackendEvent::WifiNetworks(networks)).await;
                         }
                     }
                 }
-                // Always send known networks (available even when WiFi is off)
-                if let Ok(known) = get_known_networks(&conn).await {
+                if let Ok(known) = get_known_networks(conn).await {
                     let _ = evt_tx.send(BackendEvent::WifiKnownNetworks(known)).await;
                 }
             }
+        }
+    }
+
+    // Send initial state for active WiFi device
+    if let Some(ref w) = wifi {
+        if let Some(path) = w.device_path() {
+            send_wifi_initial_state(&conn, path, &evt_tx).await;
         }
     }
 
@@ -972,14 +1082,15 @@ async fn run_backend(
     > = None;
 
     // Set up property change streams for Device
-    let mut device_powered_stream = if let Some(path) = wifi.device_path() {
-        if let Some(device) = create_device_proxy(&conn, path).await {
-            Some(device.receive_powered_changed().await)
-        } else {
-            None
+    let mut device_powered_stream = match wifi.as_ref().and_then(|w| w.device_path()) {
+        Some(path) => {
+            if let Some(device) = create_device_proxy(&conn, path).await {
+                Some(device.receive_powered_changed().await)
+            } else {
+                None
+            }
         }
-    } else {
-        None
+        None => None,
     };
 
     // Set up property change streams for Station (only if powered)
@@ -1043,13 +1154,32 @@ async fn run_backend(
     }
 
     // Initialize station streams if already powered
-    if let Some(path) = wifi.device_path() {
-        if has_station_interface(&conn, path).await {
-            let (scanning, state) = setup_station_streams(&conn, path).await;
-            station_scanning_stream = scanning;
-            station_state_stream = state;
+    if let Some(ref w) = wifi {
+        if let Some(path) = w.device_path() {
+            if has_station_interface(&conn, path).await {
+                let (scanning, state) = setup_station_streams(&conn, path).await;
+                station_scanning_stream = scanning;
+                station_state_stream = state;
+            }
         }
     }
+
+    // Subscribe to iwd ObjectManager for hot-plug (adapter add/remove)
+    let iwd_obj_manager = zbus::fdo::ObjectManagerProxy::builder(&conn)
+        .destination("net.connman.iwd")
+        .ok()
+        .and_then(|b| b.path("/").ok());
+    let mut iwd_interfaces_added = None;
+    let mut iwd_interfaces_removed = None;
+    if let Some(builder) = iwd_obj_manager {
+        if let Ok(proxy) = builder.build().await {
+            iwd_interfaces_added = proxy.receive_interfaces_added().await.ok();
+            iwd_interfaces_removed = proxy.receive_interfaces_removed().await.ok();
+        }
+    }
+
+    // Mutable copy of device infos for hot-plug updates
+    let mut wifi_device_infos = wifi_device_infos;
 
     let mut bt_scan_deadline: Option<tokio::time::Instant> = None;
 
@@ -1081,19 +1211,19 @@ async fn run_backend(
                     tracing::info!("Device powered changed: {}", powered);
                     let _ = evt_tx.send(BackendEvent::WifiPowered(powered)).await;
 
-                    if let Some(path) = wifi.device_path() {
-                        if powered {
-                            // Wait for Station interface to appear with retry
-                            let (scanning, state) = setup_station_streams_with_retry(&conn, path).await;
-                            station_scanning_stream = scanning;
-                            station_state_stream = state;
-                            // Get initial network list and known networks
-                            wifi.send_networks().await;
-                            wifi.send_known_networks().await;
-                        } else {
-                            station_scanning_stream = None;
-                            station_state_stream = None;
-                            let _ = evt_tx.send(BackendEvent::WifiNetworks(vec![])).await;
+                    if let Some(ref w) = wifi {
+                        if let Some(path) = w.device_path() {
+                            if powered {
+                                let (scanning, state) = setup_station_streams_with_retry(&conn, path).await;
+                                station_scanning_stream = scanning;
+                                station_state_stream = state;
+                                w.send_networks().await;
+                                w.send_known_networks().await;
+                            } else {
+                                station_scanning_stream = None;
+                                station_state_stream = None;
+                                let _ = evt_tx.send(BackendEvent::WifiNetworks(vec![])).await;
+                            }
                         }
                     }
                 }
@@ -1108,10 +1238,11 @@ async fn run_backend(
                 if let Ok(scanning) = change.get().await {
                     tracing::debug!("Station scanning changed: {}", scanning);
                     let _ = evt_tx.send(BackendEvent::WifiScanning(scanning)).await;
-                    // When scan completes, refresh network list and known networks
                     if !scanning {
-                        wifi.send_networks().await;
-                        wifi.send_known_networks().await;
+                        if let Some(ref w) = wifi {
+                            w.send_networks().await;
+                            w.send_known_networks().await;
+                        }
                     }
                 }
             }
@@ -1124,7 +1255,9 @@ async fn run_backend(
             } => {
                 if let Ok(state) = change.get().await {
                     tracing::info!("Station state changed: {}", state);
-                    wifi.send_connected_status().await;
+                    if let Some(ref w) = wifi {
+                        w.send_connected_status().await;
+                    }
                 }
             }
             // Handle passphrase requests from iwd agent
@@ -1211,6 +1344,82 @@ async fn run_backend(
                     code,
                 }).await;
             }
+            // Handle iwd device hot-plug: InterfacesAdded
+            Some(signal) = async {
+                match iwd_interfaces_added.as_mut() {
+                    Some(s) => s.next().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Ok(args) = signal.args() {
+                    let ifaces = args.interfaces_and_properties();
+                    if ifaces.contains_key("net.connman.iwd.Device") {
+                        tracing::info!("iwd device added: {}", args.object_path());
+                        if let Ok(infos) = find_all_iwd_devices(&conn).await {
+                            wifi_device_infos = infos;
+                            let active = wifi.as_ref().and_then(|w| w.device_path()).map(|p| p.to_string());
+                            let _ = evt_tx.send(BackendEvent::WifiDevices {
+                                devices: wifi_device_infos.clone(),
+                                active_path: active,
+                            }).await;
+                        }
+                    }
+                }
+            }
+            // Handle iwd device hot-plug: InterfacesRemoved
+            Some(signal) = async {
+                match iwd_interfaces_removed.as_mut() {
+                    Some(s) => s.next().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Ok(args) = signal.args() {
+                    let ifaces = args.interfaces();
+                    if ifaces.iter().any(|i| *i == "net.connman.iwd.Device") {
+                        let removed_path = args.object_path().to_string();
+                        tracing::info!("iwd device removed: {}", removed_path);
+
+                        // Check if the removed device is the active one
+                        let active_removed = wifi.as_ref()
+                            .and_then(|w| w.device_path())
+                            .map(|p| p.as_str() == removed_path)
+                            .unwrap_or(false);
+
+                        if let Ok(infos) = find_all_iwd_devices(&conn).await {
+                            wifi_device_infos = infos;
+                        }
+
+                        if active_removed {
+                            if let Some(info) = wifi_device_infos.first() {
+                                let path: zbus::zvariant::OwnedObjectPath = info.device_path.as_str().try_into().unwrap();
+                                wifi = Some(WifiBackend::new(conn.clone(), evt_tx.clone(), path.clone()));
+                                device_powered_stream = if let Some(device) = create_device_proxy(&conn, &path).await {
+                                    Some(device.receive_powered_changed().await)
+                                } else {
+                                    None
+                                };
+                                let (scanning, state) = setup_station_streams(&conn, &path).await;
+                                station_scanning_stream = scanning;
+                                station_state_stream = state;
+                                send_wifi_initial_state(&conn, &path, &evt_tx).await;
+                            } else {
+                                wifi = None;
+                                device_powered_stream = None;
+                                station_scanning_stream = None;
+                                station_state_stream = None;
+                                let _ = evt_tx.send(BackendEvent::WifiPowered(false)).await;
+                                let _ = evt_tx.send(BackendEvent::WifiNetworks(vec![])).await;
+                            }
+                        }
+
+                        let active = wifi.as_ref().and_then(|w| w.device_path()).map(|p| p.to_string());
+                        let _ = evt_tx.send(BackendEvent::WifiDevices {
+                            devices: wifi_device_infos.clone(),
+                            active_path: active,
+                        }).await;
+                    }
+                }
+            }
             // Handle commands from UI
             result = cmd_rx.recv() => {
                 let cmd = match result {
@@ -1221,7 +1430,9 @@ async fn run_backend(
                 match cmd {
                     BackendCommand::Shutdown => {
                         tracing::info!("Backend shutdown requested");
-                        wifi.shutdown();
+                        if let Some(ref w) = wifi {
+                            w.shutdown();
+                        }
                         drop(bt_discovery_stream);
                         break;
                     }
@@ -1230,12 +1441,51 @@ async fn run_backend(
                             let _ = tx.send(passphrase);
                         }
                     }
-                    BackendCommand::WifiScan => wifi.scan().await,
-                    BackendCommand::WifiConnect { path } => wifi.connect(&path).await,
-                    BackendCommand::WifiDisconnect => wifi.disconnect().await,
-                    BackendCommand::WifiForget { path } => wifi.forget(&path).await,
-                    BackendCommand::WifiForgetKnown { path } => wifi.forget_known(&path).await,
-                    BackendCommand::WifiSetPowered(powered) => wifi.set_powered(powered).await,
+                    BackendCommand::WifiScan { .. } => {
+                        if let Some(ref w) = wifi { w.scan().await; }
+                    }
+                    BackendCommand::WifiConnect { path, .. } => {
+                        if let Some(ref w) = wifi { w.connect(&path).await; }
+                    }
+                    BackendCommand::WifiDisconnect { .. } => {
+                        if let Some(ref w) = wifi { w.disconnect().await; }
+                    }
+                    BackendCommand::WifiForget { path } => {
+                        if let Some(ref w) = wifi { w.forget(&path).await; }
+                    }
+                    BackendCommand::WifiForgetKnown { path } => {
+                        if let Some(ref w) = wifi { w.forget_known(&path).await; }
+                    }
+                    BackendCommand::WifiSetPowered { powered, .. } => {
+                        if let Some(ref w) = wifi { w.set_powered(powered).await; }
+                    }
+                    BackendCommand::WifiSwitchAdapter { device_path } => {
+                        tracing::info!("Switching WiFi adapter to {}", device_path);
+                        // Shutdown old backend
+                        if let Some(ref w) = wifi {
+                            w.shutdown();
+                        }
+                        // Create new backend for the selected device
+                        let path: zbus::zvariant::OwnedObjectPath = device_path.as_str().try_into().unwrap();
+                        wifi = Some(WifiBackend::new(conn.clone(), evt_tx.clone(), path.clone()));
+                        // Re-setup Device property streams
+                        device_powered_stream = if let Some(device) = create_device_proxy(&conn, &path).await {
+                            Some(device.receive_powered_changed().await)
+                        } else {
+                            None
+                        };
+                        // Re-setup Station streams
+                        if has_station_interface(&conn, &path).await {
+                            let (scanning, state) = setup_station_streams(&conn, &path).await;
+                            station_scanning_stream = scanning;
+                            station_state_stream = state;
+                        } else {
+                            station_scanning_stream = None;
+                            station_state_stream = None;
+                        }
+                        // Send initial state for the new device
+                        send_wifi_initial_state(&conn, &path, &evt_tx).await;
+                    }
                     BackendCommand::BtScan => {
                         if bt_discovery_stream.is_none() {
                             if let Some(ref bt_backend) = bt {

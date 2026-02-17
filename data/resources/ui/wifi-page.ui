@@ -27,6 +27,12 @@ corresponding .blp file and regenerate this file with blueprint-compiler.
                     <child>
                       <object class="AdwPreferencesGroup" id="adapter_group">
                         <property name="title">Adapter</property>
+                        <property name="header-suffix">
+                          <object class="GtkDropDown" id="adapter_dropdown">
+                            <property name="visible">false</property>
+                            <property name="valign">3</property>
+                          </object>
+                        </property>
                         <child>
                           <object class="AdwSwitchRow" id="adapter_switch">
                             <property name="title">WiFi</property>

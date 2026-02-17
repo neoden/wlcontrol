@@ -16,6 +16,8 @@ mod imp {
         #[template_child]
         pub toast_overlay: TemplateChild<adw::ToastOverlay>,
         #[template_child]
+        pub adapter_dropdown: TemplateChild<gtk::DropDown>,
+        #[template_child]
         pub adapter_switch: TemplateChild<adw::SwitchRow>,
         #[template_child]
         pub scan_button: TemplateChild<gtk::Button>,
@@ -29,6 +31,8 @@ mod imp {
         pub saved_listbox: TemplateChild<gtk::ListBox>,
 
         pub manager: OnceCell<WlcontrolManager>,
+        /// Suppress adapter_combo "selected" handler during programmatic updates
+        pub updating_combo: std::cell::Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -113,6 +117,42 @@ impl WifiPage {
             .sync_create()
             .bidirectional()
             .build();
+
+        // Adapter selector DropDown
+        self.rebuild_adapter_dropdown(manager);
+
+        manager.connect_closure(
+            "wifi-adapters-changed",
+            false,
+            glib::closure_local!(
+                #[weak(rename_to = page)]
+                self,
+                move |manager: WlcontrolManager| {
+                    page.rebuild_adapter_dropdown(&manager);
+                }
+            ),
+        );
+
+        // When user selects a different adapter
+        let page_weak = self.downgrade();
+        imp.adapter_dropdown.connect_notify_local(
+            Some("selected"),
+            glib::clone!(
+                #[weak]
+                manager,
+                move |dropdown, _| {
+                    let Some(page) = page_weak.upgrade() else { return };
+                    if page.imp().updating_combo.get() {
+                        return;
+                    }
+                    let idx = dropdown.selected() as usize;
+                    let adapters = manager.wifi_adapters();
+                    if let Some(info) = adapters.get(idx) {
+                        manager.set_active_wifi_adapter(&info.device_path);
+                    }
+                }
+            ),
+        );
 
         // Bind main network list (all scan results)
         imp.networks_listbox.bind_model(
@@ -252,6 +292,33 @@ impl WifiPage {
         ));
         row.setup_actions(&manager, network, is_saved_offline);
         row
+    }
+
+    fn rebuild_adapter_dropdown(&self, manager: &WlcontrolManager) {
+        let imp = self.imp();
+        let adapters = manager.wifi_adapters();
+
+        imp.adapter_dropdown.set_visible(adapters.len() > 1);
+
+        let model = gtk::StringList::new(&[]);
+        for info in &adapters {
+            let label = if info.adapter_model.is_empty() {
+                info.device_name.clone()
+            } else {
+                info.adapter_model.clone()
+            };
+            model.append(&label);
+        }
+
+        imp.updating_combo.set(true);
+        imp.adapter_dropdown.set_model(Some(&model));
+
+        if let Some(active_path) = manager.active_wifi_device_path() {
+            if let Some(idx) = adapters.iter().position(|a| a.device_path == active_path) {
+                imp.adapter_dropdown.set_selected(idx as u32);
+            }
+        }
+        imp.updating_combo.set(false);
     }
 
     pub fn show_toast(&self, message: &str) {

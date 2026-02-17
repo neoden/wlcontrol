@@ -126,6 +126,10 @@ pub trait Device {
     /// Current mode: "station", "ap", "ad-hoc"
     #[zbus(property)]
     fn mode(&self) -> zbus::Result<String>;
+
+    /// Object path to the parent Adapter
+    #[zbus(property)]
+    fn adapter(&self) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
 }
 
 /// net.connman.iwd.Adapter interface

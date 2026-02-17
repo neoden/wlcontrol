@@ -9,7 +9,7 @@ use zbus::zvariant::OwnedObjectPath;
 use std::time::Duration;
 
 use super::manager::{BackendEvent, KnownNetworkData, WifiNetworkData};
-use super::wifi::iwd_proxy::{DeviceProxy, KnownNetworkProxy, NetworkProxy, StationProxy};
+use super::wifi::iwd_proxy::{AdapterProxy, DeviceProxy, KnownNetworkProxy, NetworkProxy, StationProxy};
 
 const CAPTIVE_PORTAL_CHECK_URL: &str = "http://connectivitycheck.gstatic.com/generate_204";
 
@@ -83,10 +83,18 @@ pub fn format_iwd_error(e: &zbus::Error) -> String {
     }
 }
 
-/// Find iwd Device path (exists even when WiFi is off)
-pub async fn find_iwd_device_path(
+/// Info about an iwd WiFi device, used to populate the adapter selector in UI
+#[derive(Debug, Clone)]
+pub struct IwdDeviceInfo {
+    pub device_path: String,
+    pub device_name: String,
+    pub adapter_model: String,
+}
+
+/// Find all iwd Device objects on D-Bus (exist even when WiFi is off)
+pub async fn find_all_iwd_devices(
     conn: &zbus::Connection,
-) -> Result<OwnedObjectPath, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Vec<IwdDeviceInfo>, Box<dyn std::error::Error + Send + Sync>> {
     use zbus::fdo::ObjectManagerProxy;
 
     let obj_manager = ObjectManagerProxy::builder(conn)
@@ -97,14 +105,53 @@ pub async fn find_iwd_device_path(
 
     let objects = obj_manager.get_managed_objects().await?;
 
-    let device_path = objects
-        .iter()
-        .find(|(_, ifaces)| ifaces.contains_key("net.connman.iwd.Device"))
-        .map(|(path, _)| path.clone())
-        .ok_or("No WiFi device found. Is iwd running with a WiFi adapter?")?;
+    let mut devices = Vec::new();
+    for (path, ifaces) in &objects {
+        if !ifaces.contains_key("net.connman.iwd.Device") {
+            continue;
+        }
+        let device = DeviceProxy::builder(conn)
+            .path(path.clone())?
+            .build()
+            .await?;
+        let device_name = device.name().await.unwrap_or_default();
 
-    tracing::info!("Found iwd device at {}", device_path);
-    Ok(device_path)
+        // Read adapter model via the Device.adapter property
+        let adapter_model = match device.adapter().await {
+            Ok(adapter_path) => {
+                match AdapterProxy::builder(conn)
+                    .path(adapter_path)?
+                    .build()
+                    .await
+                {
+                    Ok(adapter) => adapter.model().await.unwrap_or_default(),
+                    Err(_) => String::new(),
+                }
+            }
+            Err(_) => String::new(),
+        };
+
+        tracing::info!(
+            "Found iwd device {} at {} ({})",
+            device_name,
+            path,
+            if adapter_model.is_empty() { "unknown" } else { &adapter_model }
+        );
+        devices.push(IwdDeviceInfo {
+            device_path: path.to_string(),
+            device_name,
+            adapter_model,
+        });
+    }
+
+    // Sort by device name for stable ordering
+    devices.sort_by(|a, b| a.device_name.cmp(&b.device_name));
+
+    if devices.is_empty() {
+        tracing::warn!("No WiFi devices found. Is iwd running with a WiFi adapter?");
+    }
+
+    Ok(devices)
 }
 
 /// Check if Station interface exists (only when powered)
@@ -269,23 +316,11 @@ pub struct WifiBackend {
 }
 
 impl WifiBackend {
-    /// Create a new WifiBackend
-    pub async fn new(conn: zbus::Connection, evt_tx: Sender<BackendEvent>) -> Self {
-        let device_path = match find_iwd_device_path(&conn).await {
-            Ok(path) => {
-                tracing::info!("Found iwd device");
-                Some(path)
-            }
-            Err(e) => {
-                tracing::warn!("Failed to find iwd device: {}. WiFi features disabled.", e);
-                let _ = evt_tx.send(BackendEvent::Error(format!("iwd: {}", e))).await;
-                None
-            }
-        };
-
+    /// Create a new WifiBackend for a specific iwd device
+    pub fn new(conn: zbus::Connection, evt_tx: Sender<BackendEvent>, device_path: OwnedObjectPath) -> Self {
         Self {
             conn,
-            device_path,
+            device_path: Some(device_path),
             evt_tx,
             pending_connect: Arc::new(Mutex::new(None)),
         }
