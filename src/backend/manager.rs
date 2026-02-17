@@ -224,7 +224,10 @@ mod imp {
                     glib::subclass::Signal::builder("captive-portal")
                         .param_types([String::static_type()])
                         .build(),
-                    glib::subclass::Signal::builder("error")
+                    glib::subclass::Signal::builder("wifi-error")
+                        .param_types([String::static_type()])
+                        .build(),
+                    glib::subclass::Signal::builder("bt-error")
                         .param_types([String::static_type()])
                         .build(),
                     glib::subclass::Signal::builder("wifi-adapters-changed").build(),
@@ -426,13 +429,13 @@ impl WlcontrolManager {
                 tracing::error!("BT error: {}", msg);
                 self.clear_bt_operations();
                 self.emit_by_name::<()>("bt-device-updated", &[]);
-                self.emit_by_name::<()>("error", &[&msg]);
+                self.emit_by_name::<()>("bt-error", &[&msg]);
             }
             BackendEvent::WifiError(msg) => {
                 tracing::error!("WiFi error: {}", msg);
                 self.clear_wifi_operations();
                 self.emit_by_name::<()>("wifi-network-updated", &[]);
-                self.emit_by_name::<()>("error", &[&msg]);
+                self.emit_by_name::<()>("wifi-error", &[&msg]);
             }
         }
     }
@@ -802,13 +805,7 @@ impl WlcontrolManager {
     }
 
     fn set_bt_connecting(&self, address: &str) {
-        let store = &self.imp().bt_devices;
-        for i in 0..store.n_items() {
-            if let Some(obj) = store.item(i) {
-                let device = obj.downcast_ref::<BtDevice>().unwrap();
-                device.set_connecting(device.address() == address);
-            }
-        }
+        self.set_bt_device_flag(address, |d| d.set_connecting(true));
     }
 
     /// Reset connected state on all devices (adapter powered off).

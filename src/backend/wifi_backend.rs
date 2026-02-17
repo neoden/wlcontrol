@@ -345,7 +345,6 @@ impl WifiBackend {
         let conn = self.conn.clone();
         let evt_tx = self.evt_tx.clone();
         let device_path = self.device_path.clone();
-        let pending_connect = self.pending_connect.clone();
 
         // Spawn connect in separate task to not block passphrase handling
         let handle = tokio::spawn(async move {
@@ -391,10 +390,10 @@ impl WifiBackend {
                     let _ = evt_tx.send(BackendEvent::WifiError("Connection timed out".into())).await;
                 }
             }
-
-            // Clear pending handle when done
-            let mut guard = pending_connect.lock().await;
-            *guard = None;
+            // NOTE: we intentionally do NOT clear pending_connect here.
+            // Clearing it would race with a new connect() that stores its handle
+            // between our completion and cleanup. Aborting a completed task's handle
+            // is a no-op, so a stale handle is harmless.
         });
 
         // Store abort handle for this connection task

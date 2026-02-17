@@ -228,9 +228,9 @@ impl BluetoothPage {
         Self::bind_device_list(&imp.paired_listbox, &paired_model, manager);
         Self::bind_device_list(&imp.discovered_listbox, &discovered_model, manager);
 
-        // Handle errors
+        // Handle Bluetooth errors
         manager.connect_closure(
-            "error",
+            "bt-error",
             false,
             glib::closure_local!(
                 #[weak(rename_to = page)]

@@ -205,9 +205,9 @@ impl WifiPage {
             });
         });
 
-        // Handle errors
+        // Handle WiFi errors
         manager.connect_closure(
-            "error",
+            "wifi-error",
             false,
             glib::closure_local!(
                 #[weak(rename_to = page)]
