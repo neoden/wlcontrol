@@ -29,11 +29,12 @@ corresponding .blp file and regenerate this file with blueprint-compiler.
       </object>
     </child>
     <child type="suffix">
-      <object class="GtkButton" id="forget_button">
-        <property name="icon-name">edit-clear-symbolic</property>
-        <property name="tooltip-text">Forget network</property>
+      <object class="GtkMenuButton" id="menu_button">
+        <property name="icon-name">view-more-symbolic</property>
+        <property name="tooltip-text">Network settings</property>
         <property name="visible">false</property>
         <property name="valign">3</property>
+        <property name="menu-model">network_menu</property>
         <style>
           <class name="flat"/>
           <class name="circular"/>
@@ -41,4 +42,16 @@ corresponding .blp file and regenerate this file with blueprint-compiler.
       </object>
     </child>
   </template>
+  <menu id="network_menu">
+    <item>
+      <attribute name="label" translatable="yes">Copy Name</attribute>
+      <attribute name="action">row.copy-name</attribute>
+    </item>
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">Forget Network</attribute>
+        <attribute name="action">row.forget</attribute>
+      </item>
+    </section>
+  </menu>
 </interface>

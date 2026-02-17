@@ -250,35 +250,7 @@ impl WifiPage {
                 }
             }
         ));
-        if is_saved_offline {
-            row.connect_closure(
-                "forget-clicked",
-                false,
-                glib::closure_local!(
-                    #[weak]
-                    manager,
-                    #[weak]
-                    network,
-                    move |_row: WifiNetworkRow| {
-                        manager.request_wifi_forget_known(&network.path());
-                    }
-                ),
-            );
-        } else {
-            row.connect_closure(
-                "forget-clicked",
-                false,
-                glib::closure_local!(
-                    #[weak]
-                    manager,
-                    #[weak]
-                    network,
-                    move |_row: WifiNetworkRow| {
-                        manager.request_wifi_forget(&network.path());
-                    }
-                ),
-            );
-        }
+        row.setup_actions(&manager, network, is_saved_offline);
         row
     }
 

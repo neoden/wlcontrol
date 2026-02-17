@@ -1,6 +1,6 @@
 use adw::prelude::*;
 use adw::subclass::prelude::*;
-use gtk::{gdk, glib};
+use gtk::glib;
 use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
 
@@ -421,139 +421,12 @@ impl BluetoothPage {
                         }
                     ));
 
-                    row.connect_closure(
-                        "settings-clicked",
-                        false,
-                        glib::closure_local!(
-                            #[weak]
-                            manager,
-                            #[weak]
-                            device,
-                            move |row: BluetoothDeviceRow| {
-                                BluetoothPage::show_device_settings(&row, &manager, &device);
-                            }
-                        ),
-                    );
+                    row.setup_actions(&manager, device);
 
                     row.upcast()
                 }
             ),
         );
-    }
-
-    fn show_device_settings(row: &BluetoothDeviceRow, manager: &WlcontrolManager, device: &BtDevice) {
-        let display_name = device.display_name();
-        let address = device.address();
-        let device_type = device.device_type_name();
-
-        // Header bar with title
-        let header = adw::HeaderBar::builder()
-            .show_end_title_buttons(true)
-            .show_start_title_buttons(false)
-            .title_widget(&adw::WindowTitle::new(&display_name, device_type))
-            .build();
-
-        // Address row with copy button
-        let copy_button = gtk::Button::from_icon_name("edit-copy-symbolic");
-        copy_button.set_valign(gtk::Align::Center);
-        copy_button.add_css_class("flat");
-        let addr_for_copy = address.clone();
-        copy_button.connect_clicked(move |btn| {
-            if let Some(display) = btn.display().into() {
-                let clipboard: gdk::Clipboard = display.clipboard();
-                clipboard.set_text(&addr_for_copy);
-            }
-        });
-
-        let address_row = adw::ActionRow::builder()
-            .title("Address")
-            .subtitle(&address)
-            .activatable(false)
-            .build();
-        address_row.add_suffix(&copy_button);
-
-        // Name entry
-        let alias_entry = adw::EntryRow::builder()
-            .title("Name")
-            .text(&display_name)
-            .build();
-
-        // Trusted toggle
-        let trusted_switch = adw::SwitchRow::builder()
-            .title("Auto-connect")
-            .active(device.trusted())
-            .build();
-
-        trusted_switch.connect_active_notify(glib::clone!(
-            #[weak]
-            manager,
-            #[weak]
-            device,
-            move |switch| {
-                manager.request_bt_set_trusted(&device.path(), switch.is_active());
-            }
-        ));
-
-        // Single group with all rows
-        let group = adw::PreferencesGroup::new();
-        group.add(&address_row);
-        group.add(&alias_entry);
-        group.add(&trusted_switch);
-
-        // Forget button
-        let forget_button = gtk::Button::with_label("Forget Device");
-        forget_button.add_css_class("flat");
-        forget_button.set_halign(gtk::Align::Center);
-
-        // Content
-        let content = gtk::Box::new(gtk::Orientation::Vertical, 24);
-        content.set_margin_start(24);
-        content.set_margin_end(24);
-        content.set_margin_top(12);
-        content.set_margin_bottom(24);
-        content.append(&group);
-        content.append(&forget_button);
-
-        let toolbar_view = adw::ToolbarView::new();
-        toolbar_view.add_top_bar(&header);
-        toolbar_view.set_content(Some(&content));
-
-        let dialog = adw::Dialog::builder()
-            .child(&toolbar_view)
-            .content_width(360)
-            .title(&display_name)
-            .build();
-
-        // Forget button closes dialog and removes device
-        forget_button.connect_clicked(glib::clone!(
-            #[weak]
-            dialog,
-            #[weak]
-            manager,
-            #[weak]
-            device,
-            move |_| {
-                dialog.close();
-                manager.request_bt_remove(&device.path());
-            }
-        ));
-
-        // On close, check if alias changed
-        let original_alias = display_name.clone();
-        dialog.connect_closed(glib::clone!(
-            #[weak]
-            manager,
-            #[weak]
-            device,
-            move |_| {
-                let new_alias = alias_entry.text().to_string();
-                if !new_alias.is_empty() && new_alias != original_alias {
-                    manager.request_bt_set_alias(&device.path(), &new_alias);
-                }
-            }
-        ));
-
-        dialog.present(Some(row));
     }
 
     pub fn show_toast(&self, message: &str) {

@@ -47,15 +47,26 @@ template $BluetoothDeviceRow: Adw.ActionRow {
   }
 
   [suffix]
-  Gtk.Button settings_button {
+  Gtk.MenuButton menu_button {
     icon-name: "view-more-symbolic";
     tooltip-text: "Device settings";
     valign: center;
     visible: false;
+    menu-model: device_menu;
 
     styles [
       "flat",
       "circular",
     ]
+  }
+}
+
+menu device_menu {
+  item(_("Rename"), "row.rename")
+  item(_("Auto-connect"), "row.auto-connect")
+  item(_("Copy Address"), "row.copy-address")
+
+  section {
+    item(_("Forget Device"), "row.forget")
   }
 }

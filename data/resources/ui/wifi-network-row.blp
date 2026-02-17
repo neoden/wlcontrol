@@ -26,15 +26,24 @@ template $WifiNetworkRow: Adw.ActionRow {
   }
 
   [suffix]
-  Gtk.Button forget_button {
-    icon-name: "edit-clear-symbolic";
-    tooltip-text: "Forget network";
+  Gtk.MenuButton menu_button {
+    icon-name: "view-more-symbolic";
+    tooltip-text: "Network settings";
     visible: false;
     valign: center;
+    menu-model: network_menu;
 
     styles [
       "flat",
       "circular",
     ]
+  }
+}
+
+menu network_menu {
+  item(_("Copy Name"), "row.copy-name")
+
+  section {
+    item(_("Forget Network"), "row.forget")
   }
 }

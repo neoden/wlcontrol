@@ -1,10 +1,10 @@
 use adw::prelude::*;
 use adw::subclass::prelude::*;
-use gtk::glib;
+use gtk::{gdk, gio, glib};
 use std::cell::OnceCell;
-use std::sync::OnceLock;
 
 use crate::backend::bluetooth::{BtDevice, BtDeviceState};
+use crate::backend::WlcontrolManager;
 
 mod imp {
     use super::*;
@@ -25,9 +25,10 @@ mod imp {
         #[template_child]
         pub connected_icon: TemplateChild<gtk::Image>,
         #[template_child]
-        pub settings_button: TemplateChild<gtk::Button>,
+        pub menu_button: TemplateChild<gtk::MenuButton>,
 
         pub device: OnceCell<BtDevice>,
+        pub action_group: OnceCell<gio::SimpleActionGroup>,
     }
 
     #[glib::object_subclass]
@@ -46,23 +47,8 @@ mod imp {
     }
 
     impl ObjectImpl for BluetoothDeviceRow {
-        fn signals() -> &'static [glib::subclass::Signal] {
-            static SIGNALS: OnceLock<Vec<glib::subclass::Signal>> = OnceLock::new();
-            SIGNALS.get_or_init(|| {
-                vec![glib::subclass::Signal::builder("settings-clicked").build()]
-            })
-        }
-
         fn constructed(&self) {
             self.parent_constructed();
-
-            self.settings_button.connect_clicked(glib::clone!(
-                #[weak(rename_to = row)]
-                self,
-                move |_| {
-                    row.obj().emit_by_name::<()>("settings-clicked", &[]);
-                }
-            ));
         }
     }
     impl WidgetImpl for BluetoothDeviceRow {}
@@ -114,6 +100,161 @@ impl BluetoothDeviceRow {
         self.imp().device.get().unwrap()
     }
 
+    pub fn setup_actions(&self, manager: &WlcontrolManager, device: &BtDevice) {
+        let group = gio::SimpleActionGroup::new();
+
+        // rename
+        let rename = gio::SimpleAction::new("rename", None);
+        rename.connect_activate(glib::clone!(
+            #[weak(rename_to = row)]
+            self,
+            #[weak]
+            manager,
+            #[weak]
+            device,
+            move |_, _| {
+                Self::show_rename_dialog(&row, &manager, &device);
+            }
+        ));
+        group.add_action(&rename);
+
+        // auto-connect (stateful toggle)
+        let auto_connect = gio::SimpleAction::new_stateful(
+            "auto-connect",
+            None,
+            &device.trusted().to_variant(),
+        );
+        auto_connect.connect_change_state(glib::clone!(
+            #[weak]
+            manager,
+            #[weak]
+            device,
+            move |action, value| {
+                if let Some(trusted) = value.and_then(|v| v.get::<bool>()) {
+                    action.set_state(&trusted.to_variant());
+                    manager.request_bt_set_trusted(&device.path(), trusted);
+                }
+            }
+        ));
+        group.add_action(&auto_connect);
+
+        // Keep auto-connect state in sync with device property
+        device.connect_notify_local(
+            Some("trusted"),
+            glib::clone!(
+                #[weak]
+                auto_connect,
+                move |device, _| {
+                    auto_connect.set_state(&device.trusted().to_variant());
+                }
+            ),
+        );
+
+        // copy-address
+        let copy_address = gio::SimpleAction::new("copy-address", None);
+        copy_address.connect_activate(glib::clone!(
+            #[weak(rename_to = row)]
+            self,
+            #[weak]
+            device,
+            move |_, _| {
+                if let Some(display) = row.display().into() {
+                    let clipboard: gdk::Clipboard = display.clipboard();
+                    clipboard.set_text(&device.address());
+                }
+            }
+        ));
+        group.add_action(&copy_address);
+
+        // forget
+        let forget = gio::SimpleAction::new("forget", None);
+        forget.connect_activate(glib::clone!(
+            #[weak(rename_to = row)]
+            self,
+            #[weak]
+            manager,
+            #[weak]
+            device,
+            move |_, _| {
+                Self::show_forget_dialog(&row, &manager, &device);
+            }
+        ));
+        group.add_action(&forget);
+
+        self.insert_action_group("row", Some(&group));
+        self.imp().action_group.set(group).unwrap();
+    }
+
+    fn show_rename_dialog(row: &BluetoothDeviceRow, manager: &WlcontrolManager, device: &BtDevice) {
+        let dialog = adw::AlertDialog::builder()
+            .heading("Rename Device")
+            .build();
+
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("apply", "Apply");
+        dialog.set_response_appearance("apply", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("apply"));
+        dialog.set_close_response("cancel");
+
+        let entry = adw::EntryRow::builder()
+            .title("Name")
+            .text(&device.display_name())
+            .build();
+
+        let group = adw::PreferencesGroup::new();
+        group.add(&entry);
+        dialog.set_extra_child(Some(&group));
+
+        glib::spawn_future_local(glib::clone!(
+            #[weak]
+            manager,
+            #[weak]
+            device,
+            #[weak]
+            row,
+            async move {
+                let response = dialog.choose_future(Some(&row)).await;
+                if response == "apply" {
+                    let new_name = entry.text().to_string();
+                    if !new_name.is_empty() && new_name != device.display_name() {
+                        manager.request_bt_set_alias(&device.path(), &new_name);
+                    }
+                }
+            }
+        ));
+    }
+
+    fn show_forget_dialog(row: &BluetoothDeviceRow, manager: &WlcontrolManager, device: &BtDevice) {
+        let dialog = adw::AlertDialog::builder()
+            .heading("Forget Device?")
+            .body(&format!(
+                "\"{}\" will be removed and you will need to pair again.",
+                device.display_name()
+            ))
+            .build();
+
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("forget", "Forget");
+        dialog.set_response_appearance("forget", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+
+        glib::spawn_future_local(glib::clone!(
+            #[weak]
+            manager,
+            #[weak]
+            device,
+            #[weak]
+            row,
+            async move {
+                let response = dialog.choose_future(Some(&row)).await;
+                if response == "forget" {
+                    manager.request_bt_remove(&device.path());
+                }
+            }
+        ));
+    }
+
     /// Derive all UI widget states from the device's canonical state.
     /// Exhaustive match ensures adding a new state is a compile error
     /// until every UI element is accounted for.
@@ -143,7 +284,7 @@ impl BluetoothDeviceRow {
         match state {
             BtDeviceState::Discovered => {
                 imp.connected_icon.set_visible(false);
-                imp.settings_button.set_visible(false);
+                imp.menu_button.set_visible(false);
                 self.set_activatable(true);
                 if let Some(icon_name) = device.rssi_icon() {
                     imp.rssi_icon.set_icon_name(Some(icon_name));
@@ -154,25 +295,25 @@ impl BluetoothDeviceRow {
             }
             BtDeviceState::Pairing | BtDeviceState::Connecting => {
                 imp.connected_icon.set_visible(false);
-                imp.settings_button.set_visible(false);
+                imp.menu_button.set_visible(false);
                 imp.rssi_icon.set_visible(false);
                 self.set_activatable(false);
             }
             BtDeviceState::Paired => {
                 imp.connected_icon.set_visible(false);
-                imp.settings_button.set_visible(true);
+                imp.menu_button.set_visible(true);
                 imp.rssi_icon.set_visible(false);
                 self.set_activatable(true);
             }
             BtDeviceState::Connected => {
                 imp.connected_icon.set_visible(true);
-                imp.settings_button.set_visible(true);
+                imp.menu_button.set_visible(true);
                 imp.rssi_icon.set_visible(false);
                 self.set_activatable(true);
             }
             BtDeviceState::Disconnecting | BtDeviceState::Removing => {
                 imp.connected_icon.set_visible(false);
-                imp.settings_button.set_visible(false);
+                imp.menu_button.set_visible(false);
                 imp.rssi_icon.set_visible(false);
                 self.set_activatable(false);
             }
