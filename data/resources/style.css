@@ -11,18 +11,12 @@ button.scanning image {
   animation: spin 1s linear infinite;
 }
 
-@keyframes pulse {
-  from {
-    opacity: 0.3;
-  }
+@keyframes row-pulse {
   50% {
-    opacity: 1;
-  }
-  to {
-    opacity: 0.3;
+    background-color: alpha(@accent_bg_color, 0.25);
   }
 }
 
-.connecting-pulse {
-  animation: pulse 1.2s ease-in-out infinite;
+.bt-busy {
+  animation: row-pulse 1.5s ease-in-out infinite;
 }

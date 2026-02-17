@@ -1,6 +1,6 @@
 use adw::prelude::*;
 use adw::subclass::prelude::*;
-use gtk::glib;
+use gtk::{gdk, glib};
 use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
 
@@ -446,25 +446,44 @@ impl BluetoothPage {
         let address = device.address();
         let device_type = device.device_type_name();
 
-        let dialog = adw::AlertDialog::builder()
-            .heading(&display_name)
-            .body(&format!("{}\n{}", address, device_type))
-            .close_response("close")
-            .default_response("close")
+        // Header bar with title
+        let header = adw::HeaderBar::builder()
+            .show_end_title_buttons(true)
+            .show_start_title_buttons(false)
+            .title_widget(&adw::WindowTitle::new(&display_name, device_type))
             .build();
 
-        // Extra child: preferences group with alias entry and trusted toggle
+        // Address row with copy button
+        let copy_button = gtk::Button::from_icon_name("edit-copy-symbolic");
+        copy_button.set_valign(gtk::Align::Center);
+        copy_button.add_css_class("flat");
+        let addr_for_copy = address.clone();
+        copy_button.connect_clicked(move |btn| {
+            if let Some(display) = btn.display().into() {
+                let clipboard: gdk::Clipboard = display.clipboard();
+                clipboard.set_text(&addr_for_copy);
+            }
+        });
+
+        let address_row = adw::ActionRow::builder()
+            .title("Address")
+            .subtitle(&address)
+            .activatable(false)
+            .build();
+        address_row.add_suffix(&copy_button);
+
+        // Name entry
         let alias_entry = adw::EntryRow::builder()
             .title("Name")
             .text(&display_name)
             .build();
 
+        // Trusted toggle
         let trusted_switch = adw::SwitchRow::builder()
             .title("Auto-connect")
             .active(device.trusted())
             .build();
 
-        // Send trusted change immediately
         trusted_switch.connect_active_notify(glib::clone!(
             #[weak]
             manager,
@@ -475,41 +494,66 @@ impl BluetoothPage {
             }
         ));
 
+        // Single group with all rows
         let group = adw::PreferencesGroup::new();
+        group.add(&address_row);
         group.add(&alias_entry);
         group.add(&trusted_switch);
-        dialog.set_extra_child(Some(&group));
 
-        dialog.add_response("forget", "Forget Device");
-        dialog.set_response_appearance("forget", adw::ResponseAppearance::Destructive);
-        dialog.add_response("close", "Close");
-        dialog.set_response_appearance("close", adw::ResponseAppearance::Suggested);
+        // Forget button
+        let forget_button = gtk::Button::with_label("Forget Device");
+        forget_button.add_css_class("flat");
+        forget_button.set_halign(gtk::Align::Center);
 
-        let original_alias = display_name.clone();
+        // Content
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 24);
+        content.set_margin_start(24);
+        content.set_margin_end(24);
+        content.set_margin_top(12);
+        content.set_margin_bottom(24);
+        content.append(&group);
+        content.append(&forget_button);
 
-        glib::spawn_future_local(glib::clone!(
+        let toolbar_view = adw::ToolbarView::new();
+        toolbar_view.add_top_bar(&header);
+        toolbar_view.set_content(Some(&content));
+
+        let dialog = adw::Dialog::builder()
+            .child(&toolbar_view)
+            .content_width(360)
+            .title(&display_name)
+            .build();
+
+        // Forget button closes dialog and removes device
+        forget_button.connect_clicked(glib::clone!(
+            #[weak]
+            dialog,
             #[weak]
             manager,
             #[weak]
             device,
+            move |_| {
+                dialog.close();
+                manager.request_bt_remove(&device.path());
+            }
+        ));
+
+        // On close, check if alias changed
+        let original_alias = display_name.clone();
+        dialog.connect_closed(glib::clone!(
             #[weak]
-            row,
-            async move {
-                let response = dialog.choose_future(Some(&row)).await;
-                match response.as_str() {
-                    "forget" => {
-                        manager.request_bt_remove(&device.path());
-                    }
-                    _ => {
-                        // Check if alias changed on close
-                        let new_alias = alias_entry.text().to_string();
-                        if !new_alias.is_empty() && new_alias != original_alias {
-                            manager.request_bt_set_alias(&device.path(), &new_alias);
-                        }
-                    }
+            manager,
+            #[weak]
+            device,
+            move |_| {
+                let new_alias = alias_entry.text().to_string();
+                if !new_alias.is_empty() && new_alias != original_alias {
+                    manager.request_bt_set_alias(&device.path(), &new_alias);
                 }
             }
         ));
+
+        dialog.present(Some(row));
     }
 
     pub fn show_toast(&self, message: &str) {

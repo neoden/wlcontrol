@@ -25,8 +25,6 @@ mod imp {
         #[template_child]
         pub connected_icon: TemplateChild<gtk::Image>,
         #[template_child]
-        pub connecting_indicator: TemplateChild<gtk::Image>,
-        #[template_child]
         pub settings_button: TemplateChild<gtk::Button>,
 
         pub device: OnceCell<BtDevice>,
@@ -128,13 +126,25 @@ impl BluetoothDeviceRow {
         self.set_title(&device.display_name());
         self.update_battery_display();
 
+        // Busy states pulse the whole row
+        let busy = matches!(
+            state,
+            BtDeviceState::Pairing
+                | BtDeviceState::Connecting
+                | BtDeviceState::Disconnecting
+                | BtDeviceState::Removing
+        );
+        if busy {
+            self.add_css_class("bt-busy");
+        } else {
+            self.remove_css_class("bt-busy");
+        }
+
         match state {
             BtDeviceState::Discovered => {
                 imp.connected_icon.set_visible(false);
-                imp.connecting_indicator.set_visible(false);
                 imp.settings_button.set_visible(false);
                 self.set_activatable(true);
-                // Show RSSI for discovered devices
                 if let Some(icon_name) = device.rssi_icon() {
                     imp.rssi_icon.set_icon_name(Some(icon_name));
                     imp.rssi_icon.set_visible(true);
@@ -142,44 +152,26 @@ impl BluetoothDeviceRow {
                     imp.rssi_icon.set_visible(false);
                 }
             }
-            BtDeviceState::Pairing => {
+            BtDeviceState::Pairing | BtDeviceState::Connecting => {
                 imp.connected_icon.set_visible(false);
-                imp.connecting_indicator.set_visible(true);
                 imp.settings_button.set_visible(false);
                 imp.rssi_icon.set_visible(false);
                 self.set_activatable(false);
             }
             BtDeviceState::Paired => {
                 imp.connected_icon.set_visible(false);
-                imp.connecting_indicator.set_visible(false);
                 imp.settings_button.set_visible(true);
                 imp.rssi_icon.set_visible(false);
                 self.set_activatable(true);
-            }
-            BtDeviceState::Connecting => {
-                imp.connected_icon.set_visible(false);
-                imp.connecting_indicator.set_visible(true);
-                imp.settings_button.set_visible(false);
-                imp.rssi_icon.set_visible(false);
-                self.set_activatable(false);
             }
             BtDeviceState::Connected => {
                 imp.connected_icon.set_visible(true);
-                imp.connecting_indicator.set_visible(false);
                 imp.settings_button.set_visible(true);
                 imp.rssi_icon.set_visible(false);
                 self.set_activatable(true);
             }
-            BtDeviceState::Disconnecting => {
+            BtDeviceState::Disconnecting | BtDeviceState::Removing => {
                 imp.connected_icon.set_visible(false);
-                imp.connecting_indicator.set_visible(true);
-                imp.settings_button.set_visible(false);
-                imp.rssi_icon.set_visible(false);
-                self.set_activatable(false);
-            }
-            BtDeviceState::Removing => {
-                imp.connected_icon.set_visible(false);
-                imp.connecting_indicator.set_visible(true);
                 imp.settings_button.set_visible(false);
                 imp.rssi_icon.set_visible(false);
                 self.set_activatable(false);

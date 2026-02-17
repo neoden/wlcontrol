@@ -47,17 +47,6 @@ template $BluetoothDeviceRow: Adw.ActionRow {
   }
 
   [suffix]
-  Gtk.Image connecting_indicator {
-    icon-name: "media-record-symbolic";
-    visible: false;
-
-    styles [
-      "connecting-pulse",
-      "accent",
-    ]
-  }
-
-  [suffix]
   Gtk.Button settings_button {
     icon-name: "view-more-symbolic";
     tooltip-text: "Device settings";
