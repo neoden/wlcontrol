@@ -10,7 +10,7 @@ use super::super::manager::{BackendEvent, BtDeviceData};
 /// Convert a bluer error to a user-friendly message
 fn format_bt_error(e: &bluer::Error) -> String {
     let s = e.to_string();
-    if s.contains("page-timeout") {
+    if s.contains("page-timeout") || s.contains("abort-by-local") {
         "Device not responding. Make sure it is turned on and nearby.".into()
     } else if s.contains("profile-unavailable") {
         "No compatible services found on the device.".into()
