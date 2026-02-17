@@ -27,7 +27,8 @@ pub enum BackendCommand {
     WifiScan,
     WifiConnect { path: String },
     WifiDisconnect,
-    WifiForget { path: String }, // network path, backend will get known_network from it
+    WifiForget { path: String },           // network path, backend will get known_network from it
+    WifiForgetKnown { path: String },       // KnownNetwork D-Bus path, for saved-offline networks
     WifiSetPowered(bool),
     /// Response to a passphrase request (None = cancelled)
     PassphraseResponse { passphrase: Option<String> },
@@ -60,6 +61,14 @@ pub struct WifiNetworkData {
     pub known: bool,
 }
 
+/// Data for a saved (known) WiFi network from iwd KnownNetwork interface
+#[derive(Debug, Clone)]
+pub struct KnownNetworkData {
+    pub path: String, // KnownNetwork D-Bus path
+    pub name: String,
+    pub network_type: String,
+}
+
 /// Data for a Bluetooth device, used to transfer between backend and UI threads
 #[derive(Debug, Clone)]
 pub struct BtDeviceData {
@@ -82,7 +91,8 @@ pub enum BackendEvent {
     WifiNetworks(Vec<WifiNetworkData>),
     WifiConnected(Option<String>),    // path of connected network, or None
     WifiConnecting(String),           // path of network we're connecting to
-    WifiNetworkKnown { path: String }, // network became known (saved)
+    WifiNetworkKnown { path: String },            // network became known (saved)
+    WifiKnownNetworks(Vec<KnownNetworkData>),      // all saved networks from iwd
     /// iwd is requesting a passphrase for a network
     PassphraseRequest {
         network_path: String,
@@ -104,7 +114,7 @@ pub enum BackendEvent {
 }
 
 mod imp {
-    use super::{BackendCommand, BtDevice, Sender, WifiNetwork};
+    use super::{BackendCommand, BtDevice, KnownNetworkData, Sender, WifiNetwork};
     use adw::prelude::*;
     use adw::subclass::prelude::*;
     use gtk::{gio, glib};
@@ -113,7 +123,12 @@ mod imp {
 
     pub struct WlcontrolManager {
         pub wifi_networks: gio::ListStore,
+        pub saved_networks: gio::ListStore,
         pub bt_devices: gio::ListStore,
+        /// Cached known networks from iwd, for cross-filtering with scan results
+        pub cached_known: RefCell<Vec<KnownNetworkData>>,
+        /// Cached (name, type) pairs from scan results, for filtering known networks
+        pub cached_visible: RefCell<std::collections::HashSet<(String, String)>>,
         pub wifi_powered: RefCell<bool>,
         pub wifi_scanning: RefCell<bool>,
         pub bt_powered: RefCell<bool>,
@@ -126,7 +141,10 @@ mod imp {
         fn default() -> Self {
             Self {
                 wifi_networks: gio::ListStore::new::<WifiNetwork>(),
+                saved_networks: gio::ListStore::new::<WifiNetwork>(),
                 bt_devices: gio::ListStore::new::<BtDevice>(),
+                cached_known: RefCell::new(Vec::new()),
+                cached_visible: RefCell::new(std::collections::HashSet::new()),
                 wifi_powered: RefCell::new(false),
                 wifi_scanning: RefCell::new(false),
                 bt_powered: RefCell::new(false),
@@ -183,6 +201,7 @@ mod imp {
                     glib::subclass::Signal::builder("error")
                         .param_types([String::static_type()])
                         .build(),
+                    glib::subclass::Signal::builder("wifi-network-updated").build(),
                     glib::subclass::Signal::builder("bt-device-updated").build(),
                     glib::subclass::Signal::builder("bt-pairing")
                         .param_types([
@@ -286,13 +305,27 @@ impl WlcontrolManager {
         match event {
             BackendEvent::WifiPowered(powered) => self.set_wifi_powered(powered),
             BackendEvent::WifiScanning(scanning) => self.set_wifi_scanning(scanning),
-            BackendEvent::WifiNetworks(networks) => self.update_wifi_networks(networks),
-            BackendEvent::WifiConnected(path) => {
-                self.clear_wifi_connecting();
-                self.update_wifi_connected(path);
+            BackendEvent::WifiNetworks(networks) => {
+                self.update_wifi_networks(networks);
+                self.rebuild_saved_networks();
             }
-            BackendEvent::WifiConnecting(path) => self.set_wifi_connecting(&path),
-            BackendEvent::WifiNetworkKnown { path } => self.set_wifi_network_known(&path),
+            BackendEvent::WifiKnownNetworks(known) => {
+                self.imp().cached_known.replace(known);
+                self.rebuild_saved_networks();
+            }
+            BackendEvent::WifiConnected(path) => {
+                self.clear_wifi_operations();
+                self.update_wifi_connected(path);
+                self.emit_by_name::<()>("wifi-network-updated", &[]);
+            }
+            BackendEvent::WifiConnecting(path) => {
+                self.set_wifi_connecting(&path);
+                self.emit_by_name::<()>("wifi-network-updated", &[]);
+            }
+            BackendEvent::WifiNetworkKnown { path } => {
+                self.set_wifi_network_known(&path);
+                self.emit_by_name::<()>("wifi-network-updated", &[]);
+            }
             BackendEvent::PassphraseRequest {
                 network_path,
                 network_name,
@@ -339,12 +372,22 @@ impl WlcontrolManager {
             BackendEvent::Error(msg) => {
                 tracing::error!("Backend error: {}", msg);
                 self.clear_bt_operations();
+                self.clear_wifi_operations();
+                self.emit_by_name::<()>("bt-device-updated", &[]);
+                self.emit_by_name::<()>("wifi-network-updated", &[]);
                 self.emit_by_name::<()>("error", &[&msg]);
             }
         }
     }
 
     fn update_wifi_networks(&self, networks: Vec<WifiNetworkData>) {
+        // Cache visible (name, type) pairs for filtering known networks
+        let visible: std::collections::HashSet<(String, String)> = networks
+            .iter()
+            .map(|n| (n.name.clone(), n.network_type.clone()))
+            .collect();
+        self.imp().cached_visible.replace(visible);
+
         let store = &self.imp().wifi_networks;
         store.remove_all();
         for data in networks {
@@ -357,6 +400,26 @@ impl WlcontrolManager {
                 data.known,
             );
             store.append(&network);
+        }
+    }
+
+    /// Rebuild saved_networks store from cached known networks,
+    /// excluding those already visible in scan results.
+    fn rebuild_saved_networks(&self) {
+        let imp = self.imp();
+        let known = imp.cached_known.borrow();
+        let visible = imp.cached_visible.borrow();
+        let store = &imp.saved_networks;
+        store.remove_all();
+        for data in known.iter() {
+            if !visible.contains(&(data.name.clone(), data.network_type.clone())) {
+                let network = WifiNetwork::new_saved_offline(
+                    &data.path,
+                    &data.name,
+                    &data.network_type,
+                );
+                store.append(&network);
+            }
         }
     }
 
@@ -397,12 +460,29 @@ impl WlcontrolManager {
         }
     }
 
-    fn clear_wifi_connecting(&self) {
+    /// Clear all local operation flags on all WiFi networks.
+    /// Called on connection events and errors as a conservative reset.
+    fn clear_wifi_operations(&self) {
         let store = &self.imp().wifi_networks;
         for i in 0..store.n_items() {
             if let Some(obj) = store.item(i) {
                 let network = obj.downcast_ref::<WifiNetwork>().unwrap();
                 network.set_connecting(false);
+                network.set_disconnecting(false);
+                network.set_forgetting(false);
+            }
+        }
+    }
+
+    fn set_wifi_network_flag(&self, path: &str, f: impl Fn(&WifiNetwork)) {
+        let store = &self.imp().wifi_networks;
+        for i in 0..store.n_items() {
+            if let Some(obj) = store.item(i) {
+                let network = obj.downcast_ref::<WifiNetwork>().unwrap();
+                if network.path() == path {
+                    f(&network);
+                    return;
+                }
             }
         }
     }
@@ -420,6 +500,10 @@ impl WlcontrolManager {
 
     pub fn wifi_networks(&self) -> gio::ListStore {
         self.imp().wifi_networks.clone()
+    }
+
+    pub fn saved_networks(&self) -> gio::ListStore {
+        self.imp().saved_networks.clone()
     }
 
     pub fn bt_devices(&self) -> gio::ListStore {
@@ -507,11 +591,43 @@ impl WlcontrolManager {
     }
 
     pub fn request_wifi_disconnect(&self) {
+        // Set disconnecting flag on the currently connected network for instant UI feedback
+        let store = &self.imp().wifi_networks;
+        for i in 0..store.n_items() {
+            if let Some(obj) = store.item(i) {
+                let network = obj.downcast_ref::<WifiNetwork>().unwrap();
+                if network.connected() {
+                    network.set_disconnecting(true);
+                    break;
+                }
+            }
+        }
+        self.emit_by_name::<()>("wifi-network-updated", &[]);
         self.send_command(BackendCommand::WifiDisconnect);
     }
 
     pub fn request_wifi_forget(&self, path: &str) {
+        self.set_wifi_network_flag(path, |n| n.set_forgetting(true));
+        self.emit_by_name::<()>("wifi-network-updated", &[]);
         self.send_command(BackendCommand::WifiForget {
+            path: path.to_string(),
+        });
+    }
+
+    /// Forget a saved-offline network using its KnownNetwork D-Bus path directly
+    pub fn request_wifi_forget_known(&self, path: &str) {
+        // Set forgetting flag on the saved network for UI feedback
+        let store = &self.imp().saved_networks;
+        for i in 0..store.n_items() {
+            if let Some(obj) = store.item(i) {
+                let network = obj.downcast_ref::<WifiNetwork>().unwrap();
+                if network.path() == path {
+                    network.set_forgetting(true);
+                    break;
+                }
+            }
+        }
+        self.send_command(BackendCommand::WifiForgetKnown {
             path: path.to_string(),
         });
     }
@@ -702,7 +818,7 @@ use super::bluetooth::backend::{BtAdapterEventStream, BtDeviceEventStream, BtDis
 use super::bluetooth::BluetoothBackend;
 use super::wifi::iwd_proxy::{AgentManagerProxy, DeviceProxy, StationProxy};
 use super::wifi::{IwdAgent, PassphraseRequest};
-use super::wifi_backend::{get_wifi_networks, has_station_interface, WifiBackend};
+use super::wifi_backend::{get_known_networks, get_wifi_networks, has_station_interface, WifiBackend};
 
 async fn run_backend(
     cmd_rx: Receiver<BackendCommand>,
@@ -803,6 +919,10 @@ async fn run_backend(
                             let _ = evt_tx.send(BackendEvent::WifiNetworks(networks)).await;
                         }
                     }
+                }
+                // Always send known networks (available even when WiFi is off)
+                if let Ok(known) = get_known_networks(&conn).await {
+                    let _ = evt_tx.send(BackendEvent::WifiKnownNetworks(known)).await;
                 }
             }
         }
@@ -967,8 +1087,9 @@ async fn run_backend(
                             let (scanning, state) = setup_station_streams_with_retry(&conn, path).await;
                             station_scanning_stream = scanning;
                             station_state_stream = state;
-                            // Get initial network list
+                            // Get initial network list and known networks
                             wifi.send_networks().await;
+                            wifi.send_known_networks().await;
                         } else {
                             station_scanning_stream = None;
                             station_state_stream = None;
@@ -987,9 +1108,10 @@ async fn run_backend(
                 if let Ok(scanning) = change.get().await {
                     tracing::debug!("Station scanning changed: {}", scanning);
                     let _ = evt_tx.send(BackendEvent::WifiScanning(scanning)).await;
-                    // When scan completes, refresh network list
+                    // When scan completes, refresh network list and known networks
                     if !scanning {
                         wifi.send_networks().await;
+                        wifi.send_known_networks().await;
                     }
                 }
             }
@@ -1112,6 +1234,7 @@ async fn run_backend(
                     BackendCommand::WifiConnect { path } => wifi.connect(&path).await,
                     BackendCommand::WifiDisconnect => wifi.disconnect().await,
                     BackendCommand::WifiForget { path } => wifi.forget(&path).await,
+                    BackendCommand::WifiForgetKnown { path } => wifi.forget_known(&path).await,
                     BackendCommand::WifiSetPowered(powered) => wifi.set_powered(powered).await,
                     BackendCommand::BtScan => {
                         if bt_discovery_stream.is_none() {

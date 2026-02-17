@@ -1,9 +1,9 @@
 use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::glib;
-use std::cell::{Cell, OnceCell};
+use std::cell::OnceCell;
 
-use crate::backend::wifi::WifiNetwork;
+use crate::backend::wifi::{WifiNetwork, WifiNetworkState};
 
 mod imp {
     use super::*;
@@ -19,12 +19,9 @@ mod imp {
         #[template_child]
         pub connected_icon: TemplateChild<gtk::Image>,
         #[template_child]
-        pub connecting_indicator: TemplateChild<gtk::Image>,
-        #[template_child]
         pub forget_button: TemplateChild<gtk::Button>,
 
         pub network: OnceCell<WifiNetwork>,
-        pub saved_mode: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -78,69 +75,19 @@ glib::wrapper! {
 impl WifiNetworkRow {
     pub fn new(network: &WifiNetwork) -> Self {
         let row: Self = glib::Object::new();
-        let imp = row.imp();
+        row.imp().network.set(network.clone()).unwrap();
 
-        imp.network.set(network.clone()).unwrap();
+        // Initial UI sync
+        row.sync_ui_to_state();
 
-        // Set title and subtitle
-        row.set_title(&network.name());
-        if network.known() {
-            row.set_subtitle("Saved");
-            imp.forget_button.set_visible(true);
-        }
-
-        // Set signal icon
-        imp.signal_icon.set_icon_name(Some(network.signal_icon()));
-
-        // Show security icon for secured networks
-        imp.security_icon.set_visible(network.is_secured());
-
-        // Show connected indicator
-        imp.connected_icon.set_visible(network.connected());
-
-        // Bind property changes
+        // Single handler for ALL property changes
         network.connect_notify_local(
-            Some("connected"),
+            None,
             glib::clone!(
                 #[weak]
                 row,
-                move |network, _| {
-                    row.imp().connected_icon.set_visible(network.connected());
-                }
-            ),
-        );
-
-        network.connect_notify_local(
-            Some("signal-strength"),
-            glib::clone!(
-                #[weak]
-                row,
-                move |network, _| {
-                    row.imp()
-                        .signal_icon
-                        .set_icon_name(Some(network.signal_icon()));
-                }
-            ),
-        );
-
-        network.connect_notify_local(
-            Some("connecting"),
-            glib::clone!(
-                #[weak]
-                row,
-                move |network, _| {
-                    row.set_connecting(network.connecting());
-                }
-            ),
-        );
-
-        network.connect_notify_local(
-            Some("known"),
-            glib::clone!(
-                #[weak]
-                row,
-                move |network, _| {
-                    row.set_known(network.known());
+                move |_, _| {
+                    row.sync_ui_to_state();
                 }
             ),
         );
@@ -152,22 +99,77 @@ impl WifiNetworkRow {
         self.imp().network.get().unwrap()
     }
 
-    pub fn set_saved_mode(&self, saved: bool) {
-        self.imp().saved_mode.set(saved);
-        if saved {
-            // In saved mode, hide signal-related icons and show last connected time
-            self.imp().signal_icon.set_visible(false);
-            self.imp().security_icon.set_visible(false);
+    /// Derive all UI widget states from the network's canonical state.
+    /// Exhaustive match ensures adding a new state is a compile error
+    /// until every UI element is accounted for.
+    fn sync_ui_to_state(&self) {
+        let network = self.network();
+        let state = network.state();
+        let imp = self.imp();
+
+        // Orthogonal to state: always update
+        self.set_title(&network.name());
+        imp.signal_icon.set_icon_name(Some(network.signal_icon()));
+        imp.security_icon.set_visible(network.is_secured());
+
+        // Busy states
+        let busy = matches!(
+            state,
+            WifiNetworkState::Connecting
+                | WifiNetworkState::Disconnecting
+                | WifiNetworkState::Forgetting
+        );
+        if busy {
+            self.add_css_class("wifi-busy");
+        } else {
+            self.remove_css_class("wifi-busy");
         }
-    }
 
-    pub fn set_connecting(&self, connecting: bool) {
-        self.imp().connecting_indicator.set_visible(connecting);
-        self.imp().connected_icon.set_visible(!connecting && self.network().connected());
-    }
-
-    pub fn set_known(&self, known: bool) {
-        self.set_subtitle(if known { "Saved" } else { "" });
-        self.imp().forget_button.set_visible(known);
+        match state {
+            WifiNetworkState::Available => {
+                imp.connected_icon.set_visible(false);
+                imp.forget_button.set_visible(false);
+                self.set_subtitle("");
+                self.set_activatable(true);
+            }
+            WifiNetworkState::Saved => {
+                imp.connected_icon.set_visible(false);
+                imp.forget_button.set_visible(true);
+                imp.signal_icon.set_visible(true);
+                self.set_subtitle("Saved");
+                self.set_activatable(true);
+            }
+            WifiNetworkState::SavedOffline => {
+                imp.connected_icon.set_visible(false);
+                imp.forget_button.set_visible(true);
+                imp.signal_icon.set_visible(false);
+                self.set_subtitle("Saved");
+                self.set_activatable(false);
+            }
+            WifiNetworkState::Connecting => {
+                imp.connected_icon.set_visible(false);
+                imp.forget_button.set_visible(false);
+                self.set_subtitle("");
+                self.set_activatable(false);
+            }
+            WifiNetworkState::Connected => {
+                imp.connected_icon.set_visible(true);
+                imp.forget_button.set_visible(true);
+                self.set_subtitle("Connected");
+                self.set_activatable(true);
+            }
+            WifiNetworkState::Disconnecting => {
+                imp.connected_icon.set_visible(false);
+                imp.forget_button.set_visible(false);
+                self.set_subtitle("");
+                self.set_activatable(false);
+            }
+            WifiNetworkState::Forgetting => {
+                imp.connected_icon.set_visible(false);
+                imp.forget_button.set_visible(false);
+                self.set_subtitle("");
+                self.set_activatable(false);
+            }
+        }
     }
 }

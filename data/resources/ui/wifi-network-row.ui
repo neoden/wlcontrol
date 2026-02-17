@@ -29,16 +29,6 @@ corresponding .blp file and regenerate this file with blueprint-compiler.
       </object>
     </child>
     <child type="suffix">
-      <object class="GtkImage" id="connecting_indicator">
-        <property name="icon-name">media-record-symbolic</property>
-        <property name="visible">false</property>
-        <style>
-          <class name="connecting-pulse"/>
-          <class name="accent"/>
-        </style>
-      </object>
-    </child>
-    <child type="suffix">
       <object class="GtkButton" id="forget_button">
         <property name="icon-name">edit-clear-symbolic</property>
         <property name="tooltip-text">Forget network</property>

@@ -50,6 +50,30 @@ template $WifiPage: Adw.Bin {
             }
           }
 
+          Adw.PreferencesGroup saved_group {
+            title: "Saved Networks";
+            visible: false;
+
+            header-suffix: Gtk.ToggleButton saved_toggle {
+              icon-name: "pan-end-symbolic";
+              valign: center;
+
+              styles [
+                "flat",
+                "circular",
+              ]
+            };
+
+            Gtk.ListBox saved_listbox {
+              selection-mode: none;
+              visible: false;
+
+              styles [
+                "boxed-list",
+              ]
+            }
+          }
+
         };
       };
     };

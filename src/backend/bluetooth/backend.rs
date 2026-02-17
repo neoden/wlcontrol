@@ -1,6 +1,6 @@
 use async_channel::Sender;
 use bluer::agent::{Agent, AgentHandle, ReqError, ReqResult};
-use bluer::{Adapter, AdapterEvent, Address, Device, DeviceEvent, DeviceProperty, Session};
+use bluer::{Adapter, AdapterEvent, AdapterProperty, Address, Device, DeviceEvent, DeviceProperty, Session};
 use futures::stream::{SelectAll, StreamExt};
 use std::collections::HashSet;
 use std::pin::Pin;
@@ -369,7 +369,18 @@ impl BluetoothBackend {
                     .send(BackendEvent::BtDeviceRemoved(addr.to_string()))
                     .await;
             }
-            _ => {}
+            AdapterEvent::PropertyChanged(prop) => match prop {
+                AdapterProperty::Discoverable(discoverable) => {
+                    let _ = self
+                        .evt_tx
+                        .send(BackendEvent::BtDiscoverable(discoverable))
+                        .await;
+                }
+                AdapterProperty::Powered(powered) => {
+                    let _ = self.evt_tx.send(BackendEvent::BtPowered(powered)).await;
+                }
+                _ => {}
+            },
         }
     }
 

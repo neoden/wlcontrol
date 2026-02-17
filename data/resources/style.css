@@ -17,6 +17,7 @@ button.scanning image {
   }
 }
 
-.bt-busy {
+.bt-busy,
+.wifi-busy {
   animation: row-pulse 1.5s ease-in-out infinite;
 }

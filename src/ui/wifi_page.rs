@@ -3,7 +3,7 @@ use adw::subclass::prelude::*;
 use gtk::{gio, glib};
 use std::cell::OnceCell;
 
-use crate::backend::wifi::WifiNetwork;
+use crate::backend::wifi::{WifiNetwork, WifiNetworkState};
 use crate::backend::WlcontrolManager;
 use crate::ui::{PasswordDialog, WifiNetworkRow};
 
@@ -21,6 +21,12 @@ mod imp {
         pub scan_button: TemplateChild<gtk::Button>,
         #[template_child]
         pub networks_listbox: TemplateChild<gtk::ListBox>,
+        #[template_child]
+        pub saved_group: TemplateChild<adw::PreferencesGroup>,
+        #[template_child]
+        pub saved_toggle: TemplateChild<gtk::ToggleButton>,
+        #[template_child]
+        pub saved_listbox: TemplateChild<gtk::ListBox>,
 
         pub manager: OnceCell<WlcontrolManager>,
     }
@@ -56,7 +62,6 @@ mod imp {
         fn constructed(&self) {
             self.parent_constructed();
 
-            // Set up network list factory
             self.networks_listbox
                 .set_placeholder(Some(&Self::create_placeholder("No networks found")));
         }
@@ -87,7 +92,7 @@ impl WifiPage {
         let imp = self.imp();
         imp.manager.set(manager.clone()).unwrap();
 
-        // Add spinning animation and disable scan button while scanning
+        // Spinning animation and disable scan button while scanning
         let scan_button = imp.scan_button.clone();
         manager.connect_notify_local(
             Some("wifi-scanning"),
@@ -98,7 +103,6 @@ impl WifiPage {
                 } else {
                     scan_button.remove_css_class("scanning");
                 }
-                // Disable button during scan to prevent multiple clicks
                 scan_button.set_sensitive(!scanning);
             },
         );
@@ -110,7 +114,7 @@ impl WifiPage {
             .bidirectional()
             .build();
 
-        // Bind network list
+        // Bind main network list (all scan results)
         imp.networks_listbox.bind_model(
             Some(&manager.wifi_networks()),
             glib::clone!(
@@ -119,37 +123,47 @@ impl WifiPage {
                 #[upgrade_or_panic]
                 move |item| {
                     let network = item.downcast_ref::<WifiNetwork>().unwrap();
-                    let row = WifiNetworkRow::new(network);
-                    row.connect_activated(glib::clone!(
-                        #[weak]
-                        manager,
-                        #[weak]
-                        network,
-                        move |_| {
-                            if network.connected() {
-                                manager.request_wifi_disconnect();
-                            } else {
-                                manager.request_wifi_connect(&network.path());
-                            }
-                        }
-                    ));
-                    row.connect_closure(
-                        "forget-clicked",
-                        false,
-                        glib::closure_local!(
-                            #[weak]
-                            manager,
-                            #[weak]
-                            network,
-                            move |_row: WifiNetworkRow| {
-                                manager.request_wifi_forget(&network.path());
-                            }
-                        ),
-                    );
-                    row.upcast()
+                    Self::create_network_row(network, &manager, false).upcast()
                 }
             ),
         );
+
+        // Bind saved networks list (known networks not in range)
+        imp.saved_listbox.bind_model(
+            Some(&manager.saved_networks()),
+            glib::clone!(
+                #[weak]
+                manager,
+                #[upgrade_or_panic]
+                move |item| {
+                    let network = item.downcast_ref::<WifiNetwork>().unwrap();
+                    Self::create_network_row(network, &manager, true).upcast()
+                }
+            ),
+        );
+
+        // Show/hide saved group based on item count
+        let saved_group = imp.saved_group.clone();
+        let update_saved_visibility = move |store: &gio::ListStore| {
+            saved_group.set_visible(store.n_items() > 0);
+        };
+        let saved_store = manager.saved_networks();
+        update_saved_visibility(&saved_store);
+        saved_store.connect_items_changed(move |store, _, _, _| {
+            update_saved_visibility(store);
+        });
+
+        // Toggle button expands/collapses saved listbox
+        let saved_listbox = imp.saved_listbox.clone();
+        imp.saved_toggle.connect_toggled(move |button| {
+            let expanded = button.is_active();
+            saved_listbox.set_visible(expanded);
+            button.set_icon_name(if expanded {
+                "pan-down-symbolic"
+            } else {
+                "pan-end-symbolic"
+            });
+        });
 
         // Handle errors
         manager.connect_closure(
@@ -207,6 +221,65 @@ impl WifiPage {
                 }
             ),
         );
+    }
+
+    fn create_network_row(
+        network: &WifiNetwork,
+        manager: &WlcontrolManager,
+        is_saved_offline: bool,
+    ) -> WifiNetworkRow {
+        let row = WifiNetworkRow::new(network);
+        row.connect_activated(glib::clone!(
+            #[weak]
+            manager,
+            #[weak]
+            network,
+            move |_| {
+                match network.state() {
+                    WifiNetworkState::Connected => {
+                        manager.request_wifi_disconnect();
+                    }
+                    WifiNetworkState::Available | WifiNetworkState::Saved => {
+                        manager.request_wifi_connect(&network.path());
+                    }
+                    // SavedOffline and in-progress states: ignore clicks
+                    WifiNetworkState::SavedOffline
+                    | WifiNetworkState::Connecting
+                    | WifiNetworkState::Disconnecting
+                    | WifiNetworkState::Forgetting => {}
+                }
+            }
+        ));
+        if is_saved_offline {
+            row.connect_closure(
+                "forget-clicked",
+                false,
+                glib::closure_local!(
+                    #[weak]
+                    manager,
+                    #[weak]
+                    network,
+                    move |_row: WifiNetworkRow| {
+                        manager.request_wifi_forget_known(&network.path());
+                    }
+                ),
+            );
+        } else {
+            row.connect_closure(
+                "forget-clicked",
+                false,
+                glib::closure_local!(
+                    #[weak]
+                    manager,
+                    #[weak]
+                    network,
+                    move |_row: WifiNetworkRow| {
+                        manager.request_wifi_forget(&network.path());
+                    }
+                ),
+            );
+        }
+        row
     }
 
     pub fn show_toast(&self, message: &str) {

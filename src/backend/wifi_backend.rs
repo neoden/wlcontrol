@@ -8,7 +8,7 @@ use zbus::zvariant::OwnedObjectPath;
 
 use std::time::Duration;
 
-use super::manager::{BackendEvent, WifiNetworkData};
+use super::manager::{BackendEvent, KnownNetworkData, WifiNetworkData};
 use super::wifi::iwd_proxy::{DeviceProxy, KnownNetworkProxy, NetworkProxy, StationProxy};
 
 const CAPTIVE_PORTAL_CHECK_URL: &str = "http://connectivitycheck.gstatic.com/generate_204";
@@ -177,6 +177,44 @@ pub async fn get_wifi_networks(
 
     tracing::info!("Loaded {} WiFi networks", networks.len());
     Ok(networks)
+}
+
+/// Get all saved (known) networks from iwd via ObjectManager
+pub async fn get_known_networks(
+    conn: &zbus::Connection,
+) -> Result<Vec<KnownNetworkData>, Box<dyn std::error::Error + Send + Sync>> {
+    use zbus::fdo::ObjectManagerProxy;
+
+    let obj_manager = ObjectManagerProxy::builder(conn)
+        .destination("net.connman.iwd")?
+        .path("/")?
+        .build()
+        .await?;
+
+    let objects = obj_manager.get_managed_objects().await?;
+    let mut known_networks = Vec::new();
+
+    for (path, interfaces) in &objects {
+        if !interfaces.contains_key("net.connman.iwd.KnownNetwork") {
+            continue;
+        }
+        let kn = KnownNetworkProxy::builder(conn)
+            .path(path.clone())?
+            .build()
+            .await?;
+
+        let name = kn.name().await.unwrap_or_default();
+        let network_type = kn.network_type().await.unwrap_or_else(|_| "open".into());
+
+        known_networks.push(KnownNetworkData {
+            path: path.to_string(),
+            name,
+            network_type,
+        });
+    }
+
+    tracing::info!("Found {} known networks from iwd", known_networks.len());
+    Ok(known_networks)
 }
 
 /// Helper to create NetworkProxy from path
@@ -434,6 +472,7 @@ impl WifiBackend {
             Ok(()) => {
                 tracing::info!("Forgot network: {}", network_path);
                 self.send_networks().await;
+                self.send_known_networks().await;
             }
             Err(e) => {
                 tracing::error!("Forget failed: {}", e);
@@ -464,11 +503,54 @@ impl WifiBackend {
         }
     }
 
+    /// Forget a saved network using its KnownNetwork D-Bus path directly.
+    /// Used for saved-offline networks that have no Network object.
+    pub async fn forget_known(&self, known_path: &str) {
+        tracing::info!("Forgetting known network: {}", known_path);
+
+        let owned_path: OwnedObjectPath = match known_path.try_into() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("Invalid known network path: {}", e);
+                let _ = self.evt_tx.send(BackendEvent::Error("Invalid path".into())).await;
+                return;
+            }
+        };
+
+        let known = match create_known_network_proxy(&self.conn, owned_path).await {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::error!("{}", e);
+                let _ = self.evt_tx.send(BackendEvent::Error("Failed to forget network".into())).await;
+                return;
+            }
+        };
+
+        match known.forget().await {
+            Ok(()) => {
+                tracing::info!("Forgot known network: {}", known_path);
+                self.send_networks().await;
+                self.send_known_networks().await;
+            }
+            Err(e) => {
+                tracing::error!("Forget known failed: {}", e);
+                let _ = self.evt_tx.send(BackendEvent::Error(format!("Forget: {}", e))).await;
+            }
+        }
+    }
+
     /// Send current network list to UI
     pub async fn send_networks(&self) {
         let Some(station) = self.station().await else { return };
         if let Ok(networks) = get_wifi_networks(&self.conn, &station).await {
             let _ = self.evt_tx.send(BackendEvent::WifiNetworks(networks)).await;
+        }
+    }
+
+    /// Send all known (saved) networks to UI
+    pub async fn send_known_networks(&self) {
+        if let Ok(known) = get_known_networks(&self.conn).await {
+            let _ = self.evt_tx.send(BackendEvent::WifiKnownNetworks(known)).await;
         }
     }
 
