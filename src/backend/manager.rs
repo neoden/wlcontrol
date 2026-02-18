@@ -98,6 +98,10 @@ pub enum BtPairingKind {
 /// Events sent from backend to UI
 #[derive(Debug, Clone)]
 pub enum BackendEvent {
+    /// Whether WiFi backend (iwd) is available
+    WifiAvailable(bool),
+    /// Whether Bluetooth backend (bluez) is available
+    BtAvailable(bool),
     /// List of available WiFi adapters + which one is active
     WifiDevices {
         devices: Vec<super::wifi_backend::IwdDeviceInfo>,
@@ -146,8 +150,10 @@ mod imp {
         pub cached_known: RefCell<Vec<KnownNetworkData>>,
         /// Cached (name, type) pairs from scan results, for filtering known networks
         pub cached_visible: RefCell<std::collections::HashSet<(String, String)>>,
+        pub wifi_available: RefCell<bool>,
         pub wifi_powered: RefCell<bool>,
         pub wifi_scanning: RefCell<bool>,
+        pub bt_available: RefCell<bool>,
         pub bt_powered: RefCell<bool>,
         pub bt_discovering: RefCell<bool>,
         pub bt_discoverable: RefCell<bool>,
@@ -166,8 +172,10 @@ mod imp {
                 bt_devices: gio::ListStore::new::<BtDevice>(),
                 cached_known: RefCell::new(Vec::new()),
                 cached_visible: RefCell::new(std::collections::HashSet::new()),
+                wifi_available: RefCell::new(false),
                 wifi_powered: RefCell::new(false),
                 wifi_scanning: RefCell::new(false),
+                bt_available: RefCell::new(false),
                 bt_powered: RefCell::new(false),
                 bt_discovering: RefCell::new(false),
                 bt_discoverable: RefCell::new(false),
@@ -198,11 +206,17 @@ mod imp {
             static PROPERTIES: OnceLock<Vec<glib::ParamSpec>> = OnceLock::new();
             PROPERTIES.get_or_init(|| {
                 vec![
+                    glib::ParamSpecBoolean::builder("wifi-available")
+                        .read_only()
+                        .build(),
                     glib::ParamSpecBoolean::builder("wifi-powered").build(),
                     glib::ParamSpecBoolean::builder("wifi-scanning")
                         .read_only()
                         .build(),
                     glib::ParamSpecUInt::builder("wifi-adapter-count")
+                        .read_only()
+                        .build(),
+                    glib::ParamSpecBoolean::builder("bt-available")
                         .read_only()
                         .build(),
                     glib::ParamSpecBoolean::builder("bt-powered").build(),
@@ -246,9 +260,11 @@ mod imp {
 
         fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
             match pspec.name() {
+                "wifi-available" => self.wifi_available.borrow().to_value(),
                 "wifi-powered" => self.wifi_powered.borrow().to_value(),
                 "wifi-scanning" => self.wifi_scanning.borrow().to_value(),
                 "wifi-adapter-count" => (self.wifi_adapters.borrow().len() as u32).to_value(),
+                "bt-available" => self.bt_available.borrow().to_value(),
                 "bt-powered" => self.bt_powered.borrow().to_value(),
                 "bt-discovering" => self.bt_discovering.borrow().to_value(),
                 "bt-discoverable" => self.bt_discoverable.borrow().to_value(),
@@ -333,6 +349,12 @@ impl WlcontrolManager {
 
     fn handle_event(&self, event: BackendEvent) {
         match event {
+            BackendEvent::WifiAvailable(available) => {
+                self.set_wifi_available(available);
+            }
+            BackendEvent::BtAvailable(available) => {
+                self.set_bt_available(available);
+            }
             BackendEvent::WifiDevices { devices, active_path } => {
                 if let Some(ref path) = active_path {
                     self.imp().active_wifi_device.replace(Some(path.clone()));
@@ -590,6 +612,17 @@ impl WlcontrolManager {
         self.imp().bt_devices.clone()
     }
 
+    pub fn wifi_available(&self) -> bool {
+        *self.imp().wifi_available.borrow()
+    }
+
+    fn set_wifi_available(&self, available: bool) {
+        if *self.imp().wifi_available.borrow() != available {
+            self.imp().wifi_available.replace(available);
+            self.notify("wifi-available");
+        }
+    }
+
     pub fn wifi_powered(&self) -> bool {
         *self.imp().wifi_powered.borrow()
     }
@@ -609,6 +642,17 @@ impl WlcontrolManager {
         if *self.imp().wifi_scanning.borrow() != scanning {
             self.imp().wifi_scanning.replace(scanning);
             self.notify("wifi-scanning");
+        }
+    }
+
+    pub fn bt_available(&self) -> bool {
+        *self.imp().bt_available.borrow()
+    }
+
+    fn set_bt_available(&self, available: bool) {
+        if *self.imp().bt_available.borrow() != available {
+            self.imp().bt_available.replace(available);
+            self.notify("bt-available");
         }
     }
 

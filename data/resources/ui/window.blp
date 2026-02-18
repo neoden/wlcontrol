@@ -17,7 +17,7 @@ template $WlcontrolWindow: Adw.ApplicationWindow {
     }
 
     content: Adw.ViewStack stack {
-      Adw.ViewStackPage {
+      Adw.ViewStackPage wifi_stack_page {
         name: "wifi";
         title: "WiFi";
         icon-name: "network-wireless-symbolic";
@@ -25,7 +25,7 @@ template $WlcontrolWindow: Adw.ApplicationWindow {
         child: $WifiPage wifi_page {};
       }
 
-      Adw.ViewStackPage {
+      Adw.ViewStackPage bt_stack_page {
         name: "bluetooth";
         title: "Bluetooth";
         icon-name: "bluetooth-symbolic";

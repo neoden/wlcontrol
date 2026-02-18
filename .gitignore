@@ -23,3 +23,9 @@ PLAN.md
 
 # Generated UI files (compiled from .blp by build.rs)
 data/resources/ui/*.ui
+
+# makepkg artifacts
+pkg/
+*.pkg.tar.*
+wlcontrol/
+src/wlcontrol/

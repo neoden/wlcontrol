@@ -62,14 +62,23 @@ pub async fn init(
     conn.object_server().at(agent_path, agent).await?;
     tracing::info!("Registered iwd agent at {}", agent_path);
 
-    // Discover all WiFi devices
+    // Discover all WiFi devices via iwd
     let wifi_device_infos = match find_all_iwd_devices(&conn).await {
         Ok(infos) => infos,
         Err(e) => {
-            tracing::warn!("Failed to enumerate iwd devices: {}", e);
+            tracing::warn!("iwd service not available: {}. WiFi features disabled.", e);
             Vec::new()
         }
     };
+
+    // WiFi is available if iwd is running and we found at least one device
+    let wifi_available = !wifi_device_infos.is_empty();
+    if wifi_available {
+        tracing::info!("WiFi available: found {} adapter(s) via iwd", wifi_device_infos.len());
+    } else {
+        tracing::info!("WiFi unavailable: iwd not running or no adapters found");
+    }
+    let _ = evt_tx.send(BackendEvent::WifiAvailable(wifi_available)).await;
 
     // Pick initial adapter: prefer one that's already connected, fall back to first
     let initial_device = {
@@ -142,7 +151,7 @@ pub async fn init(
         }
     }
 
-    // Initialize Bluetooth backend
+    // Initialize Bluetooth backend via bluez
     let (bt, bt_pairing_rx): (
         Option<BluetoothBackend>,
         Option<async_channel::Receiver<BtPairingRequest>>,
@@ -150,15 +159,21 @@ pub async fn init(
         Ok((bt, rx)) => (Some(bt), Some(rx)),
         Err(e) => {
             tracing::warn!(
-                "Failed to initialize Bluetooth backend: {}. BT disabled.",
+                "bluez service not available: {}. Bluetooth features disabled.",
                 e
             );
-            let _ = evt_tx
-                .send(BackendEvent::BtError(format!("Bluetooth: {}", e)))
-                .await;
             (None, None)
         }
     };
+
+    // Bluetooth is available if we successfully created the backend
+    let bt_available = bt.is_some();
+    if bt_available {
+        tracing::info!("Bluetooth available via bluez");
+    } else {
+        tracing::info!("Bluetooth unavailable: bluez not running or no adapter found");
+    }
+    let _ = evt_tx.send(BackendEvent::BtAvailable(bt_available)).await;
 
     // BT streams
     let bt_discovery_stream: Option<BtDiscoveryStream> = None;

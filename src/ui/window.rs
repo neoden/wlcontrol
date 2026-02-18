@@ -13,6 +13,10 @@ mod imp {
     #[template(resource = "/dev/neoden/wlcontrol/ui/window.ui")]
     pub struct WlcontrolWindow {
         #[template_child]
+        pub wifi_stack_page: TemplateChild<adw::ViewStackPage>,
+        #[template_child]
+        pub bt_stack_page: TemplateChild<adw::ViewStackPage>,
+        #[template_child]
         pub wifi_page: TemplateChild<WifiPage>,
         #[template_child]
         pub bluetooth_page: TemplateChild<BluetoothPage>,
@@ -65,6 +69,16 @@ impl WlcontrolWindow {
         window.imp().manager.set(manager.clone()).unwrap();
         window.imp().wifi_page.set_manager(manager);
         window.imp().bluetooth_page.set_manager(manager);
+
+        // Bind page visibility to backend availability
+        manager
+            .bind_property("wifi-available", &*window.imp().wifi_stack_page, "visible")
+            .sync_create()
+            .build();
+        manager
+            .bind_property("bt-available", &*window.imp().bt_stack_page, "visible")
+            .sync_create()
+            .build();
 
         window
     }
