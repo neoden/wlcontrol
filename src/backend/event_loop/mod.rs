@@ -15,7 +15,7 @@ use super::bluetooth::BluetoothBackend;
 use super::manager::{BackendCommand, BackendEvent};
 use super::wifi::iwd_proxy::{AgentManagerProxy, StationProxy};
 use super::wifi::{IwdAgent, PassphraseRequest};
-use super::wifi_backend::{find_all_iwd_devices, WifiBackend};
+use super::wifi::{find_all_iwd_devices, WifiBackend};
 
 pub use state::{BackendState, LoopAction};
 pub use streams::EventStreams;

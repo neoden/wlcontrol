@@ -6,7 +6,7 @@ use zbus::zvariant::OwnedObjectPath;
 
 use super::super::bluetooth::backend::{BluetoothBackend, BtPairingRequest};
 use super::super::manager::{BackendCommand, BackendEvent, BtPairingKind};
-use super::super::wifi_backend::{find_all_iwd_devices, IwdDeviceInfo, WifiBackend};
+use super::super::wifi::{find_all_iwd_devices, IwdDeviceInfo, WifiBackend};
 use super::helpers::{
     create_device_proxy, send_wifi_initial_state, setup_station_streams,
     setup_station_streams_with_retry,

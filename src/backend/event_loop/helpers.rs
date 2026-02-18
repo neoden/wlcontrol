@@ -4,7 +4,7 @@ use zbus::zvariant::OwnedObjectPath;
 
 use super::super::manager::BackendEvent;
 use super::super::wifi::iwd_proxy::{DeviceProxy, StationProxy};
-use super::super::wifi_backend::{get_known_networks, get_wifi_networks};
+use super::super::wifi::{get_known_networks, get_wifi_networks};
 
 /// Create DeviceProxy safely, returning None on failure.
 pub async fn create_device_proxy(

@@ -104,7 +104,7 @@ pub enum BackendEvent {
     BtAvailable(bool),
     /// List of available WiFi adapters + which one is active
     WifiDevices {
-        devices: Vec<super::wifi_backend::IwdDeviceInfo>,
+        devices: Vec<super::wifi::IwdDeviceInfo>,
         active_path: Option<String>,
     },
     WifiPowered(bool),
@@ -141,7 +141,7 @@ pub enum BackendEvent {
 
 mod imp {
     use super::{BackendCommand, BtDevice, KnownNetworkData, Sender, WifiNetwork};
-    use super::super::wifi_backend::IwdDeviceInfo;
+    use super::super::wifi::IwdDeviceInfo;
     use adw::prelude::*;
     use adw::subclass::prelude::*;
     use gtk::{gio, glib};
@@ -715,7 +715,7 @@ impl WlcontrolManager {
         }
     }
 
-    pub fn wifi_adapters(&self) -> Vec<super::wifi_backend::IwdDeviceInfo> {
+    pub fn wifi_adapters(&self) -> Vec<super::wifi::IwdDeviceInfo> {
         self.imp().wifi_adapters.borrow().clone()
     }
 

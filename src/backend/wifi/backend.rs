@@ -8,8 +8,8 @@ use zbus::zvariant::OwnedObjectPath;
 
 use std::time::Duration;
 
-use super::manager::{BackendEvent, KnownNetworkData, WifiNetworkData};
-use super::wifi::iwd_proxy::{AdapterProxy, DeviceProxy, KnownNetworkProxy, NetworkProxy, StationProxy};
+use crate::backend::manager::{BackendEvent, KnownNetworkData, WifiNetworkData};
+use super::iwd_proxy::{AdapterProxy, DeviceProxy, KnownNetworkProxy, NetworkProxy, StationProxy};
 
 const CAPTIVE_PORTAL_CHECK_URL: &str = "http://connectivitycheck.gstatic.com/generate_204";
 
