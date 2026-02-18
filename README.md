@@ -4,6 +4,10 @@ WiFi and Bluetooth control app for Linux, built with GTK4/libadwaita.
 
 Uses [IWD](https://iwd.wiki.kernel.org/) for WiFi and [BlueZ](http://www.bluez.org/) for Bluetooth.
 
+This is a "scratch my own itch" project. I got tired of CLI tools for managing wireless connections and just wanted a nice-looking GUI where I can simply click around with my mouse.
+
+![WiFi settings](docs/wifi.png)
+
 ## Installation
 
 ### Arch Linux (AUR)
@@ -18,9 +22,9 @@ or for the latest git version:
 yay -S wlcontrol-git
 ```
 
-## Build Dependencies
+## Building
 
-### Ubuntu / Debian
+### Build dependencies in Ubuntu / Debian
 
 ```bash
 sudo apt install pkg-config libdbus-1-dev libgdk-pixbuf-2.0-dev libgtk-4-dev libadwaita-1-dev blueprint-compiler
