@@ -1,18 +1,19 @@
 # Maintainer: Lenar Imamutdinov <lenar dot imamutdinov at gmail dot com>
 _pkgname=wlcontrol
 pkgname=${_pkgname}-git
-pkgver=0.1.0.r7.g7b88298
+pkgver=0.1.0.r0.gb666011
 pkgrel=1
 pkgdesc="WiFi and Bluetooth control app, built with GTK4/libadwaita"
 arch=('x86_64')
 url="https://github.com/neoden/wlcontrol"
 license=('MIT')
 depends=('gtk4' 'libadwaita' 'dbus')
-makedepends=('git' 'cargo' 'blueprint-compiler')
+makedepends=('git' 'cargo' 'blueprint-compiler' 'gcc' 'pkgconf')
 optdepends=(
     'iwd: WiFi support'
     'bluez: Bluetooth support'
 )
+options=(!lto)
 source=("git+https://github.com/neoden/${_pkgname}.git")
 sha256sums=('SKIP')
 
