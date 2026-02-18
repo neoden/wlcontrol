@@ -290,7 +290,7 @@ impl WifiPage {
                 }
             }
         ));
-        row.setup_actions(&manager, network, is_saved_offline);
+        row.setup_actions(manager, network, is_saved_offline);
         row
     }
 

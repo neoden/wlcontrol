@@ -5,7 +5,7 @@ use futures::stream::{SelectAll, StreamExt};
 use std::collections::HashSet;
 use std::pin::Pin;
 
-use super::super::manager::{BackendEvent, BtDeviceData};
+use super::super::types::{BackendEvent, BtDeviceData};
 
 /// Convert a bluer error to a user-friendly message
 fn format_bt_error(e: &bluer::Error) -> String {
@@ -305,7 +305,6 @@ impl BluetoothBackend {
                 .await
                 .ok()
                 .flatten()
-                .map(|r| r as i16)
                 .unwrap_or(i16::MIN),
         })
     }
@@ -318,7 +317,7 @@ impl BluetoothBackend {
         result: Result<(), bluer::Error>,
     ) -> bool {
         let data = Self::read_device_data(device).await;
-        let error = result.as_ref().err().map(|e| format_bt_error(e));
+        let error = result.as_ref().err().map(format_bt_error);
         if let Some(data) = data {
             let _ = evt_tx
                 .send(BackendEvent::BtOperationDone { data, error })
@@ -527,10 +526,9 @@ impl BluetoothBackend {
         match adapter.device(addr) {
             Ok(device) => {
                 let result = device.connect().await;
-                if result.is_ok() {
-                    tracing::info!("Connected to BT device {}", addr);
-                } else {
-                    tracing::error!("BT connect to {} failed: {}", addr, result.as_ref().unwrap_err());
+                match &result {
+                    Ok(()) => tracing::info!("Connected to BT device {}", addr),
+                    Err(e) => tracing::error!("BT connect to {} failed: {}", addr, e),
                 }
                 Self::complete_device_op(&self.evt_tx, &device, result).await;
             }
@@ -592,10 +590,9 @@ impl BluetoothBackend {
             let _ = evt_tx.send(BackendEvent::BtConnecting(addr.to_string())).await;
             tracing::info!("Starting pairing with {}", addr);
             let result = device.pair().await;
-            if result.is_ok() {
-                tracing::info!("Paired with BT device {}", addr);
-            } else {
-                tracing::error!("BT pair with {} failed: {}", addr, result.as_ref().unwrap_err());
+            match &result {
+                Ok(()) => tracing::info!("Paired with BT device {}", addr),
+                Err(e) => tracing::error!("BT pair with {} failed: {}", addr, e),
             }
             if Self::complete_device_op(&evt_tx, &device, result).await {
                 // Trust the device after pairing so it can auto-connect

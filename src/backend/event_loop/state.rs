@@ -5,7 +5,7 @@ use tokio::sync::oneshot;
 use zbus::zvariant::OwnedObjectPath;
 
 use super::super::bluetooth::backend::{BluetoothBackend, BtPairingRequest};
-use super::super::manager::{BackendCommand, BackendEvent, BtPairingKind};
+use super::super::types::{BackendCommand, BackendEvent, BtPairingKind};
 use super::super::wifi::{find_all_iwd_devices, IwdDeviceInfo, WifiBackend};
 use super::helpers::{
     create_device_proxy, send_wifi_initial_state, setup_station_streams,
@@ -278,7 +278,7 @@ impl BackendState {
                     bt_backend.set_trusted_flag(&path, trusted).await;
                 }
             }
-            BackendCommand::BtSetPowered(powered) => {
+            BackendCommand::BtSetPowered { powered } => {
                 if !powered {
                     if streams.bt_discovery_stream.take().is_some() {
                         if let Some(ref bt_backend) = self.bt {
@@ -303,7 +303,7 @@ impl BackendState {
                     }
                 }
             }
-            BackendCommand::BtSetDiscoverable(discoverable) => {
+            BackendCommand::BtSetDiscoverable { discoverable } => {
                 if let Some(ref bt_backend) = self.bt {
                     bt_backend.set_discoverable(discoverable).await;
                 }

@@ -5,7 +5,7 @@ use futures::StreamExt;
 use super::super::bluetooth::backend::{
     BtAdapterEventStream, BtDeviceEventStream, BtDiscoveryStream, BtPairingRequest,
 };
-use super::super::manager::BackendCommand;
+use super::super::types::BackendCommand;
 use super::super::wifi::PassphraseRequest;
 use super::helpers::{next_iwd_added, next_iwd_removed};
 use super::LoopEvent;

@@ -131,7 +131,7 @@ impl WifiNetworkRow {
     ) {
         let dialog = adw::AlertDialog::builder()
             .heading("Forget Network?")
-            .body(&format!(
+            .body(format!(
                 "\"{}\" will be removed and you will need to enter the password again.",
                 network.name()
             ))

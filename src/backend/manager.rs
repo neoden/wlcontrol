@@ -6,6 +6,10 @@ use std::sync::OnceLock;
 use tokio::runtime::Runtime;
 
 use super::bluetooth::BtDevice;
+use super::store_helpers::{find_index, for_each, with_item};
+use super::types::{
+    BackendCommand, BackendEvent, BtDeviceData, BtPairingKind, KnownNetworkData, WifiNetworkData,
+};
 use super::wifi::WifiNetwork;
 
 fn runtime() -> &'static Runtime {
@@ -16,127 +20,6 @@ fn runtime() -> &'static Runtime {
             .build()
             .expect("Failed to create tokio runtime")
     })
-}
-
-/// Commands sent from UI to backend
-#[derive(Debug, Clone)]
-pub enum BackendCommand {
-    /// Shutdown the backend gracefully
-    Shutdown,
-    WifiScan,
-    WifiConnect { path: String },
-    WifiDisconnect,
-    WifiForget { path: String },           // network path, backend will get known_network from it
-    WifiForgetKnown { path: String },       // KnownNetwork D-Bus path, for saved-offline networks
-    WifiSetPowered { powered: bool },
-    /// Switch to a different WiFi adapter (recreate backend + streams)
-    WifiSwitchAdapter { device_path: String },
-    /// Response to a passphrase request (None = cancelled)
-    PassphraseResponse { passphrase: Option<String> },
-    BtScan,
-    BtStopScan,
-    BtConnect { path: String },
-    BtDisconnect { path: String },
-    BtPair { path: String },
-    BtRemove { path: String },
-    BtSetAlias { path: String, alias: String },
-    BtSetTrusted { path: String, trusted: bool },
-    BtSetPowered(bool),
-    BtSetDiscoverable(bool),
-    /// Response to a pairing confirmation/authorization (accept or reject)
-    BtPairingResponse { accept: bool },
-    /// Response with PIN code
-    BtPairingPinResponse { pin: Option<String> },
-    /// Response with numeric passkey
-    BtPairingPasskeyResponse { passkey: Option<u32> },
-}
-
-/// Data for a WiFi network, used to transfer between backend and UI threads
-#[derive(Debug, Clone)]
-pub struct WifiNetworkData {
-    pub path: String,
-    pub name: String,
-    pub network_type: String,
-    pub signal_strength: i16,
-    pub connected: bool,
-    pub known: bool,
-}
-
-/// Data for a saved (known) WiFi network from iwd KnownNetwork interface
-#[derive(Debug, Clone)]
-pub struct KnownNetworkData {
-    pub path: String, // KnownNetwork D-Bus path
-    pub name: String,
-    pub network_type: String,
-}
-
-/// Data for a Bluetooth device, used to transfer between backend and UI threads
-#[derive(Debug, Clone)]
-pub struct BtDeviceData {
-    pub address: String,
-    pub name: String,
-    pub alias: String,
-    pub icon: String,
-    pub paired: bool,
-    pub trusted: bool,
-    pub connected: bool,
-    pub battery_percentage: i32, // -1 if not available
-    pub rssi: i16,               // i16::MIN = no data
-}
-
-/// Kind of Bluetooth pairing interaction
-#[derive(Debug, Clone)]
-pub enum BtPairingKind {
-    ConfirmPasskey(String),
-    RequestPin,
-    RequestPasskey,
-    DisplayPasskey(String),
-    DisplayPin(String),
-    Authorize,
-}
-
-/// Events sent from backend to UI
-#[derive(Debug, Clone)]
-pub enum BackendEvent {
-    /// Whether WiFi backend (iwd) is available
-    WifiAvailable(bool),
-    /// Whether Bluetooth backend (bluez) is available
-    BtAvailable(bool),
-    /// List of available WiFi adapters + which one is active
-    WifiDevices {
-        devices: Vec<super::wifi::IwdDeviceInfo>,
-        active_path: Option<String>,
-    },
-    WifiPowered(bool),
-    WifiScanning(bool),
-    WifiNetworks(Vec<WifiNetworkData>),
-    WifiConnected(Option<String>),    // path of connected network, or None
-    WifiConnecting(String),           // path of network we're connecting to
-    WifiNetworkKnown { path: String },            // network became known (saved)
-    WifiKnownNetworks(Vec<KnownNetworkData>),      // all saved networks from iwd
-    /// iwd is requesting a passphrase for a network
-    PassphraseRequest {
-        network_path: String,
-        network_name: String,
-    },
-    /// Captive portal detected after connection, URL to open in browser
-    CaptivePortal { url: String },
-    BtPowered(bool),
-    BtDiscovering(bool),
-    BtDiscoverable(bool),
-    BtConnecting(String),    // address of device we're connecting/pairing to
-    BtDeviceAdded(BtDeviceData),
-    BtDeviceChanged(BtDeviceData),
-    /// Device operation (connect/disconnect/pair) completed — carries
-    /// re-read device state from BlueZ + optional error message.
-    BtOperationDone {
-        data: BtDeviceData,
-        error: Option<String>,
-    },
-    BtDeviceRemoved(String), // address
-    BtPairing { kind: BtPairingKind, address: String },
-    BtError(String),
-    WifiError(String),
 }
 
 mod imp {
@@ -296,7 +179,7 @@ mod imp {
                     if let Some(tx) = self.cmd_tx.get() {
                         let tx = tx.clone();
                         glib::spawn_future_local(async move {
-                            let _ = tx.send(BackendCommand::BtSetPowered(powered)).await;
+                            let _ = tx.send(BackendCommand::BtSetPowered { powered }).await;
                         });
                     }
                 }
@@ -306,7 +189,7 @@ mod imp {
                     if let Some(tx) = self.cmd_tx.get() {
                         let tx = tx.clone();
                         glib::spawn_future_local(async move {
-                            let _ = tx.send(BackendCommand::BtSetDiscoverable(discoverable)).await;
+                            let _ = tx.send(BackendCommand::BtSetDiscoverable { discoverable }).await;
                         });
                     }
                 }
@@ -537,67 +420,41 @@ impl WlcontrolManager {
     }
 
     fn update_wifi_connected(&self, connected_path: Option<String>) {
-        let store = &self.imp().wifi_networks;
-        for i in 0..store.n_items() {
-            if let Some(obj) = store.item(i) {
-                let network = obj.downcast_ref::<WifiNetwork>().unwrap();
-                let is_connected = connected_path
-                    .as_ref()
-                    .map(|p| p == &network.path())
-                    .unwrap_or(false);
-                network.set_connected(is_connected);
-            }
-        }
+        for_each::<WifiNetwork, _>(&self.imp().wifi_networks, |network| {
+            let is_connected = connected_path
+                .as_ref()
+                .map(|p| p == &network.path())
+                .unwrap_or(false);
+            network.set_connected(is_connected);
+        });
     }
 
     fn set_wifi_network_known(&self, path: &str) {
-        let store = &self.imp().wifi_networks;
-        for i in 0..store.n_items() {
-            if let Some(obj) = store.item(i) {
-                let network = obj.downcast_ref::<WifiNetwork>().unwrap();
-                if network.path() == path {
-                    network.set_known(true);
-                    break;
-                }
-            }
-        }
+        with_item::<WifiNetwork, _, _>(
+            &self.imp().wifi_networks,
+            |n| n.path() == path,
+            |n| n.set_known(true),
+        );
     }
 
     fn set_wifi_connecting(&self, path: &str) {
-        let store = &self.imp().wifi_networks;
-        for i in 0..store.n_items() {
-            if let Some(obj) = store.item(i) {
-                let network = obj.downcast_ref::<WifiNetwork>().unwrap();
-                network.set_connecting(network.path() == path);
-            }
-        }
+        for_each::<WifiNetwork, _>(&self.imp().wifi_networks, |network| {
+            network.set_connecting(network.path() == path);
+        });
     }
 
     /// Clear all local operation flags on all WiFi networks.
     /// Called on connection events and errors as a conservative reset.
     fn clear_wifi_operations(&self) {
-        let store = &self.imp().wifi_networks;
-        for i in 0..store.n_items() {
-            if let Some(obj) = store.item(i) {
-                let network = obj.downcast_ref::<WifiNetwork>().unwrap();
-                network.set_connecting(false);
-                network.set_disconnecting(false);
-                network.set_forgetting(false);
-            }
-        }
+        for_each::<WifiNetwork, _>(&self.imp().wifi_networks, |network| {
+            network.set_connecting(false);
+            network.set_disconnecting(false);
+            network.set_forgetting(false);
+        });
     }
 
-    fn set_wifi_network_flag(&self, path: &str, f: impl Fn(&WifiNetwork)) {
-        let store = &self.imp().wifi_networks;
-        for i in 0..store.n_items() {
-            if let Some(obj) = store.item(i) {
-                let network = obj.downcast_ref::<WifiNetwork>().unwrap();
-                if network.path() == path {
-                    f(&network);
-                    return;
-                }
-            }
-        }
+    fn set_wifi_network_flag(&self, path: &str, f: impl FnOnce(&WifiNetwork)) {
+        with_item::<WifiNetwork, _, _>(&self.imp().wifi_networks, |n| n.path() == path, f);
     }
 
     fn send_command(&self, cmd: BackendCommand) {
@@ -738,6 +595,8 @@ impl WlcontrolManager {
     }
 
     pub fn request_wifi_connect(&self, path: &str) {
+        self.set_wifi_network_flag(path, |n| n.set_connecting(true));
+        self.emit_by_name::<()>("wifi-network-updated", &[]);
         self.send_command(BackendCommand::WifiConnect {
             path: path.to_string(),
         });
@@ -745,16 +604,11 @@ impl WlcontrolManager {
 
     pub fn request_wifi_disconnect(&self) {
         // Set disconnecting flag on the currently connected network for instant UI feedback
-        let store = &self.imp().wifi_networks;
-        for i in 0..store.n_items() {
-            if let Some(obj) = store.item(i) {
-                let network = obj.downcast_ref::<WifiNetwork>().unwrap();
-                if network.connected() {
-                    network.set_disconnecting(true);
-                    break;
-                }
-            }
-        }
+        with_item::<WifiNetwork, _, _>(
+            &self.imp().wifi_networks,
+            |n| n.connected(),
+            |n| n.set_disconnecting(true),
+        );
         self.emit_by_name::<()>("wifi-network-updated", &[]);
         self.send_command(BackendCommand::WifiDisconnect);
     }
@@ -770,16 +624,11 @@ impl WlcontrolManager {
     /// Forget a saved-offline network using its KnownNetwork D-Bus path directly
     pub fn request_wifi_forget_known(&self, path: &str) {
         // Set forgetting flag on the saved network for UI feedback
-        let store = &self.imp().saved_networks;
-        for i in 0..store.n_items() {
-            if let Some(obj) = store.item(i) {
-                let network = obj.downcast_ref::<WifiNetwork>().unwrap();
-                if network.path() == path {
-                    network.set_forgetting(true);
-                    break;
-                }
-            }
-        }
+        with_item::<WifiNetwork, _, _>(
+            &self.imp().saved_networks,
+            |n| n.path() == path,
+            |n| n.set_forgetting(true),
+        );
         self.send_command(BackendCommand::WifiForgetKnown {
             path: path.to_string(),
         });
@@ -851,12 +700,8 @@ impl WlcontrolManager {
         self.send_command(BackendCommand::BtPairingPasskeyResponse { passkey });
     }
 
-    fn set_bt_device_flag(&self, address: &str, f: impl Fn(&BtDevice)) {
-        if let Some(idx) = self.find_bt_device_index(address) {
-            if let Some(obj) = self.imp().bt_devices.item(idx) {
-                f(obj.downcast_ref::<BtDevice>().unwrap());
-            }
-        }
+    fn set_bt_device_flag(&self, address: &str, f: impl FnOnce(&BtDevice)) {
+        with_item::<BtDevice, _, _>(&self.imp().bt_devices, |d| d.address() == address, f);
     }
 
     fn set_bt_connecting(&self, address: &str) {
@@ -865,40 +710,21 @@ impl WlcontrolManager {
 
     /// Reset connected state on all devices (adapter powered off).
     fn reset_bt_connected_state(&self) {
-        let store = &self.imp().bt_devices;
-        for i in 0..store.n_items() {
-            if let Some(obj) = store.item(i) {
-                let device = obj.downcast_ref::<BtDevice>().unwrap();
-                device.set_connected(false);
-            }
-        }
+        for_each::<BtDevice, _>(&self.imp().bt_devices, |d| d.set_connected(false));
     }
 
     /// Clear all local operation flags on all devices.
     /// Called on errors and state changes as a conservative reset.
     fn clear_bt_operations(&self) {
-        let store = &self.imp().bt_devices;
-        for i in 0..store.n_items() {
-            if let Some(obj) = store.item(i) {
-                let device = obj.downcast_ref::<BtDevice>().unwrap();
-                device.set_connecting(false);
-                device.set_disconnecting(false);
-                device.set_removing(false);
-            }
-        }
+        for_each::<BtDevice, _>(&self.imp().bt_devices, |d| {
+            d.set_connecting(false);
+            d.set_disconnecting(false);
+            d.set_removing(false);
+        });
     }
 
     fn find_bt_device_index(&self, address: &str) -> Option<u32> {
-        let store = &self.imp().bt_devices;
-        for i in 0..store.n_items() {
-            if let Some(obj) = store.item(i) {
-                let device = obj.downcast_ref::<BtDevice>().unwrap();
-                if device.address() == address {
-                    return Some(i);
-                }
-            }
-        }
-        None
+        find_index::<BtDevice, _>(&self.imp().bt_devices, |d| d.address() == address)
     }
 
     fn add_bt_device(&self, data: &BtDeviceData) {
@@ -928,10 +754,10 @@ impl WlcontrolManager {
     }
 
     fn update_bt_device(&self, data: &BtDeviceData) {
-        let store = &self.imp().bt_devices;
-        if let Some(idx) = self.find_bt_device_index(&data.address) {
-            if let Some(obj) = store.item(idx) {
-                let device = obj.downcast_ref::<BtDevice>().unwrap();
+        with_item::<BtDevice, _, _>(
+            &self.imp().bt_devices,
+            |d| d.address() == data.address,
+            |device| {
                 device.set_name(&data.name);
                 device.set_alias(&data.alias);
                 device.set_icon(&data.icon);
@@ -940,8 +766,8 @@ impl WlcontrolManager {
                 device.set_connected(data.connected);
                 device.set_battery_percentage(data.battery_percentage);
                 device.set_rssi(data.rssi);
-            }
-        }
+            },
+        );
     }
 
     fn remove_bt_device(&self, address: &str) {

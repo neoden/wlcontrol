@@ -196,7 +196,7 @@ impl BluetoothDeviceRow {
 
         let entry = adw::EntryRow::builder()
             .title("Name")
-            .text(&device.display_name())
+            .text(device.display_name())
             .build();
 
         let group = adw::PreferencesGroup::new();
@@ -225,7 +225,7 @@ impl BluetoothDeviceRow {
     fn show_forget_dialog(row: &BluetoothDeviceRow, manager: &WlcontrolManager, device: &BtDevice) {
         let dialog = adw::AlertDialog::builder()
             .heading("Forget Device?")
-            .body(&format!(
+            .body(format!(
                 "\"{}\" will be removed and you will need to pair again.",
                 device.display_name()
             ))

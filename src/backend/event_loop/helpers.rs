@@ -2,7 +2,7 @@ use async_channel::Sender;
 use futures::StreamExt;
 use zbus::zvariant::OwnedObjectPath;
 
-use super::super::manager::BackendEvent;
+use super::super::types::BackendEvent;
 use super::super::wifi::iwd_proxy::{DeviceProxy, StationProxy};
 use super::super::wifi::{get_known_networks, get_wifi_networks};
 

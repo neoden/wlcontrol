@@ -12,7 +12,7 @@ use super::bluetooth::backend::{
     BtAdapterEventStream, BtDeviceEventStream, BtDiscoveryStream, BtPairingRequest,
 };
 use super::bluetooth::BluetoothBackend;
-use super::manager::{BackendCommand, BackendEvent};
+use super::types::{BackendCommand, BackendEvent};
 use super::wifi::iwd_proxy::{AgentManagerProxy, StationProxy};
 use super::wifi::{IwdAgent, PassphraseRequest};
 use super::wifi::{find_all_iwd_devices, WifiBackend};
