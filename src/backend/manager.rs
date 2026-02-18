@@ -127,6 +127,12 @@ pub enum BackendEvent {
     BtConnecting(String),    // address of device we're connecting/pairing to
     BtDeviceAdded(BtDeviceData),
     BtDeviceChanged(BtDeviceData),
+    /// Device operation (connect/disconnect/pair) completed — carries
+    /// re-read device state from BlueZ + optional error message.
+    BtOperationDone {
+        data: BtDeviceData,
+        error: Option<String>,
+    },
     BtDeviceRemoved(String), // address
     BtPairing { kind: BtPairingKind, address: String },
     BtError(String),
@@ -427,13 +433,18 @@ impl WlcontrolManager {
             BackendEvent::BtDeviceAdded(data) => self.add_bt_device(&data),
             BackendEvent::BtDeviceChanged(data) => {
                 self.update_bt_device(&data);
-                // BlueZ confirmed state change — clear local operation flags for this device
+                self.emit_by_name::<()>("bt-device-updated", &[]);
+            }
+            BackendEvent::BtOperationDone { data, error } => {
+                self.update_bt_device(&data);
                 self.set_bt_device_flag(&data.address, |d| {
                     d.set_connecting(false);
                     d.set_disconnecting(false);
-                    // Don't clear removing — that's only cleared by BtDeviceRemoved or Error
                 });
                 self.emit_by_name::<()>("bt-device-updated", &[]);
+                if let Some(msg) = error {
+                    self.emit_by_name::<()>("bt-error", &[&msg]);
+                }
             }
             BackendEvent::BtDeviceRemoved(address) => self.remove_bt_device(&address),
             BackendEvent::BtPairing { kind, address } => {

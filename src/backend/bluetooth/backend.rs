@@ -310,6 +310,26 @@ impl BluetoothBackend {
         })
     }
 
+    /// Complete a device operation: re-read state from BlueZ and send BtOperationDone.
+    /// Returns true if the operation succeeded.
+    async fn complete_device_op(
+        evt_tx: &Sender<BackendEvent>,
+        device: &Device,
+        result: Result<(), bluer::Error>,
+    ) -> bool {
+        let data = Self::read_device_data(device).await;
+        let error = result.as_ref().err().map(|e| format_bt_error(e));
+        if let Some(data) = data {
+            let _ = evt_tx
+                .send(BackendEvent::BtOperationDone { data, error })
+                .await;
+        } else if let Some(msg) = error {
+            // Can't read device (already removed?), fall back to generic error
+            let _ = evt_tx.send(BackendEvent::BtError(msg)).await;
+        }
+        result.is_ok()
+    }
+
     /// Start tracking property changes for a device
     async fn start_tracking_device(
         addr: Address,
@@ -506,15 +526,13 @@ impl BluetoothBackend {
         let _ = self.evt_tx.send(BackendEvent::BtConnecting(addr_str.to_string())).await;
         match adapter.device(addr) {
             Ok(device) => {
-                if let Err(e) = device.connect().await {
-                    tracing::error!("BT connect to {} failed: {}", addr, e);
-                    let _ = self
-                        .evt_tx
-                        .send(BackendEvent::BtError(format_bt_error(&e)))
-                        .await;
-                } else {
+                let result = device.connect().await;
+                if result.is_ok() {
                     tracing::info!("Connected to BT device {}", addr);
+                } else {
+                    tracing::error!("BT connect to {} failed: {}", addr, result.as_ref().unwrap_err());
                 }
+                Self::complete_device_op(&self.evt_tx, &device, result).await;
             }
             Err(e) => {
                 tracing::error!("Cannot get device {}: {}", addr, e);
@@ -536,13 +554,11 @@ impl BluetoothBackend {
         };
 
         if let Ok(device) = adapter.device(addr) {
-            if let Err(e) = device.disconnect().await {
+            let result = device.disconnect().await;
+            if let Err(ref e) = result {
                 tracing::error!("BT disconnect from {} failed: {}", addr, e);
-                let _ = self
-                    .evt_tx
-                    .send(BackendEvent::BtError(format_bt_error(&e)))
-                    .await;
             }
+            Self::complete_device_op(&self.evt_tx, &device, result).await;
         }
     }
 
@@ -575,13 +591,13 @@ impl BluetoothBackend {
         tokio::spawn(async move {
             let _ = evt_tx.send(BackendEvent::BtConnecting(addr.to_string())).await;
             tracing::info!("Starting pairing with {}", addr);
-            if let Err(e) = device.pair().await {
-                tracing::error!("BT pair with {} failed: {}", addr, e);
-                let _ = evt_tx
-                    .send(BackendEvent::BtError(format_bt_error(&e)))
-                    .await;
-            } else {
+            let result = device.pair().await;
+            if result.is_ok() {
                 tracing::info!("Paired with BT device {}", addr);
+            } else {
+                tracing::error!("BT pair with {} failed: {}", addr, result.as_ref().unwrap_err());
+            }
+            if Self::complete_device_op(&evt_tx, &device, result).await {
                 // Trust the device after pairing so it can auto-connect
                 if let Err(e) = device.set_trusted(true).await {
                     tracing::warn!("Failed to set trusted for {}: {}", addr, e);
