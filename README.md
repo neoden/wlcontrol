@@ -6,7 +6,9 @@ Uses [IWD](https://iwd.wiki.kernel.org/) for WiFi and [BlueZ](http://www.bluez.o
 
 This is a "scratch my own itch" project. I got tired of CLI tools for managing wireless connections and just wanted a nice-looking GUI where I can simply click around with my mouse.
 
-![WiFi settings](docs/wifi.png)
+<p align="center">
+  <img src="docs/wifi.png" width="50%">
+</p>
 
 ## Installation
 
